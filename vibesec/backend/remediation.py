@@ -98,19 +98,19 @@ def generate_unified_diff(original: str, patched: str, filename: str = "snippet"
 
 async def propose_remediation_patch(
     vulnerability: Dict[str, Any],
-    code: str,
+    code: str = "",
     language: str = "python",
     filename: str = "snippet"
 ) -> Dict[str, Any]:
     """
-    Ask the configured local Ollama model to propose a secure remediation patch.
+    Ask the configured local Ollama model to propose a secure remediation patch,
+    or generate actionable remediation steps for file-level / environment configuration findings.
     Validates patch structure and bounds context for CPU/GPU inference.
     """
-    if not code or not isinstance(code, str) or not code.strip():
-        raise ValueError("Code content cannot be empty.")
     if not vulnerability or not isinstance(vulnerability, dict):
         raise ValueError("Vulnerability finding metadata must be provided.")
 
+    code_text = (code or "").strip()
     title = str(vulnerability.get("title", "Unknown Flaw"))[:160]
     severity = str(vulnerability.get("severity", "medium"))[:30]
     owasp = str(vulnerability.get("owasp", "N/A"))[:100]
@@ -118,9 +118,65 @@ async def propose_remediation_patch(
     line_hint = vulnerability.get("line_hint", "1")
     description = str(vulnerability.get("description", ""))[:600]
     snippet = str(vulnerability.get("code_snippet", ""))[:1500]
+    target_file = vulnerability.get("file", filename or "file")
+    fix_text = vulnerability.get("fix", "")
 
-    # Limit code size to reasonable bounds for local Ollama
-    bounded_code = code[:8000]
+    # Handle file-level or environment findings without a code snippet
+    if not code_text and not snippet:
+        lower_title = title.lower()
+        lower_file = target_file.lower()
+
+        if "environment file" in lower_title or ".env" in lower_file or "template" in lower_title or "credential" in lower_title:
+            remediation_steps = [
+                f"Remove '{target_file}' from Git tracking: git rm --cached {target_file}",
+                f"Add '{target_file}' to .gitignore to ensure sensitive credentials are never committed.",
+                f"Commit the removal: git commit -m \"chore: remove {target_file} from version control tracking\"",
+                "If credentials were ever pushed to a public remote repository, rewrite history using git-filter-repo or BFG Repo-Cleaner.",
+                "Revoke and rotate any exposed API keys, passwords, database URLs, and session secrets immediately."
+            ]
+            recommended_commands = [
+                f"git rm --cached {target_file}",
+                f"echo \"{target_file}\" >> .gitignore",
+                "git commit -m \"chore: untrack sensitive environment file\"",
+            ]
+        else:
+            remediation_steps = [
+                f"Review repository and filesystem permissions for '{target_file}'.",
+                fix_text or f"Remediate the {title} misconfiguration according to security policy.",
+                "Verify file is excluded from public builds and container image layers.",
+                "Re-run VibeSec security audit to confirm resolved state."
+            ]
+            recommended_commands = [
+                f"# Inspect file status:\ngit status {target_file}",
+            ]
+
+        explanation = (
+            fix_text or (
+                f"Finding '{title}' is an environment/repository configuration issue for '{target_file}'. "
+                "Because this flaw is at the file and Git-tracking level rather than inline syntax, "
+                "an automated code diff is not applicable. Follow the actionable remediation steps below."
+            )
+        )
+
+        return {
+            "success": True,
+            "is_file_level": True,
+            "remediation_type": "actionable_instructions",
+            "title": title,
+            "filename": target_file,
+            "explanation": explanation,
+            "remediation_steps": remediation_steps,
+            "recommended_commands": recommended_commands,
+            "patched_code": "",
+            "unified_diff": "",
+            "changes_summary": remediation_steps,
+            "model_used": "VibeSec Remediation Copilot",
+            "disclaimer": SECURITY_DISCLAIMER,
+        }
+
+    # Code snippet is available
+    active_code = code_text if code_text else snippet
+    bounded_code = active_code[:8000]
 
     prompt = PROPOSE_PATCH_PROMPT.format(
         title=title,
@@ -129,7 +185,7 @@ async def propose_remediation_patch(
         rule_id=rule_id,
         line_hint=line_hint,
         description=description,
-        code_snippet=snippet,
+        code_snippet=snippet or bounded_code[:500],
         full_code=bounded_code,
         language=language
     )

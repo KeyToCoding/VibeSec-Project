@@ -600,12 +600,23 @@ async def api_propose_patch(req: ProposePatchRequest):
     Validates patch structure and scope against the submitted code.
     """
     code_text = (req.code or "").strip()
-    if not code_text:
-        raise HTTPException(status_code=400, detail="Source code cannot be empty.")
-    if len(code_text.encode("utf-8")) > MAX_CODE_SIZE:
-        raise HTTPException(status_code=413, detail="Code exceeds maximum allowed size.")
     if not req.vulnerability:
         raise HTTPException(status_code=400, detail="Vulnerability details are required.")
+    if len(code_text.encode("utf-8")) > MAX_CODE_SIZE:
+        raise HTTPException(status_code=413, detail="Code exceeds maximum allowed size.")
+
+    snippet = (req.vulnerability.get("code_snippet") or "").strip()
+    vuln_title = (req.vulnerability.get("title") or "").lower()
+    vuln_file = (req.vulnerability.get("file") or "").lower()
+    is_file_level = (
+        "environment file" in vuln_title
+        or ".env" in vuln_file
+        or "template" in vuln_title
+        or not snippet
+    )
+
+    if not code_text and not is_file_level:
+        raise HTTPException(status_code=400, detail="Source code cannot be empty.")
 
     result = await propose_remediation_patch(
         vulnerability=req.vulnerability,

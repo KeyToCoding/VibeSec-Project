@@ -786,6 +786,153 @@ function extractRateLimitHeaders(headers: Headers): Record<string, string> {
   return info;
 }
 
+function isEnvTemplateFilename(path: string): boolean {
+  if (!path) return false;
+  const normalized = path.replace(/\\/g, '/').toLowerCase();
+  const filename = normalized.split('/').pop() || '';
+  if (['.env.example', '.env.sample', '.env.template', '.env.dist', '.env.defaults', '.env.sample.local', '.env.test'].includes(filename)) {
+    return true;
+  }
+  if (/\.env\.(example|sample|template|dist|defaults)$/i.test(filename)) {
+    return true;
+  }
+  if (/^(example|sample|template)\.env$/i.test(filename)) {
+    return true;
+  }
+  if (filename.endsWith('.example') || filename.endsWith('.sample') || filename.endsWith('.template')) {
+    return true;
+  }
+  return false;
+}
+
+function isCommittedEnvFilename(path: string): boolean {
+  if (!path) return false;
+  const normalized = path.replace(/\\/g, '/').toLowerCase();
+  const filename = normalized.split('/').pop() || '';
+  if (isEnvTemplateFilename(filename)) return false;
+  if (filename === '.env') return true;
+  if (filename.startsWith('.env.')) return true;
+  return false;
+}
+
+const PLACEHOLDER_SUBSTRINGS = [
+  'your-', 'your_', 'your ', '<your',
+  'change_me', 'changeme', 'change-me', 'change_this',
+  'replace_me', 'replaceme', 'replace-me', 'replace_this',
+  'insert_here', 'insert_', 'insert-', 'enter-your', 'enter_your',
+  'placeholder', 'example', 'sample', 'dummy', 'fake', 'todo', 'tbd',
+  'xxx', 'xxxx', 'secret_here', 'key_here', 'token_here', 'password_here',
+  'your-random-', 'your-strong-', 'your-secret-', 'your_secret_',
+  'my-secret', 'my_secret', 'some-secret', 'some_secret',
+  'postgres://user:password@', 'mongodb://localhost', 'localhost', '127.0.0.1',
+  'http://', 'https://', 'not-a-real', 'test-token',
+];
+
+function isPlaceholderValue(val: string): boolean {
+  const cleaned = val.trim().replace(/^['"]|['"]$/g, '').trim();
+  if (!cleaned) return true;
+  if (/^<.*>$/.test(cleaned) || /^\[.*\]$/.test(cleaned) || /^\{.*\}$/.test(cleaned) || /^\*.*\*$/.test(cleaned)) return true;
+  if (cleaned.startsWith('(') && cleaned.endsWith(')')) return true;
+
+  const lower = cleaned.toLowerCase();
+  for (const sub of PLACEHOLDER_SUBSTRINGS) {
+    if (lower.includes(sub)) return true;
+  }
+  if (['true', 'false', 'null', 'none', 'undefined', 'dev', 'prod', 'test', 'local', 'development', 'production', 'default'].includes(lower)) {
+    return true;
+  }
+  if (/^\d+$/.test(lower)) return true;
+  return false;
+}
+
+const SENSITIVE_KEY_REGEX = /SECRET|PASSWORD|PASSWD|TOKEN|PRIVATE_KEY|AUTH|CREDENTIAL|API_KEY|ACCESS_KEY|DATABASE_URL|MONGODB_URI|REDIS_URL|DB_PASS|MASTER_KEY|ENCRYPTION_KEY|PROXY_TOKEN/i;
+
+const HIGH_CONFIDENCE_SECRET_PATTERNS: [RegExp, string][] = [
+  [/sk-[a-zA-Z0-9]{20,}/, 'OpenAI / Stripe Secret Key'],
+  [/AIza[0-9A-Za-z-_]{35}/, 'Google Cloud API Key'],
+  [/(?:ghp_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{82})/, 'GitHub Personal Access Token'],
+  [/AKIA[0-9A-Z]{16}/, 'AWS Access Key ID'],
+  [/sq0atp-[0-9A-Za-z\-_]{22}/, 'Square Access Token'],
+  [/eyJ[a-zA-Z0-9_\-]{20,}\.eyJ[a-zA-Z0-9_\-]{20,}\.[a-zA-Z0-9_\-]+/, 'Exposed JWT Token'],
+  [/xox[baprs]-[0-9a-zA-Z]{10,48}/, 'Slack Token'],
+  [/-----BEGIN (?:RSA|EC|DSA|OPENSSH|PGP|PRIVATE) KEY-----/, 'Private Cryptographic Key'],
+];
+
+function inspectEnvFileContent(content: string, path: string): any[] {
+  const findings: any[] = [];
+  const lines = content.split('\n');
+  const isTemplate = isEnvTemplateFilename(path);
+  const isRuntimeEnv = isCommittedEnvFilename(path);
+
+  const realSecretsFound: { lineNum: number; lineStr: string; keyName: string; secretType: string }[] = [];
+
+  for (let idx = 0; idx < lines.length; idx++) {
+    const lineNum = idx + 1;
+    const stripped = lines[idx].trim();
+    if (!stripped || stripped.startsWith('#')) continue;
+
+    let matchedToken = false;
+    for (const [pat, desc] of HIGH_CONFIDENCE_SECRET_PATTERNS) {
+      const m = stripped.match(pat);
+      if (m && !isPlaceholderValue(m[0])) {
+        realSecretsFound.push({ lineNum, lineStr: stripped, keyName: 'TOKEN', secretType: desc });
+        matchedToken = true;
+        break;
+      }
+    }
+    if (matchedToken) continue;
+
+    if (stripped.includes('=')) {
+      const eqIdx = stripped.indexOf('=');
+      const key = stripped.slice(0, eqIdx).trim();
+      const val = stripped.slice(eqIdx + 1).trim();
+
+      if (SENSITIVE_KEY_REGEX.test(key) && !isPlaceholderValue(val)) {
+        realSecretsFound.push({ lineNum, lineStr: stripped, keyName: key, secretType: 'Sensitive Credential' });
+      }
+    }
+  }
+
+  if (isTemplate) {
+    for (const sec of realSecretsFound) {
+      findings.push({
+        title: `Exposed Credential in Environment Template: ${sec.keyName}`,
+        severity: 'critical',
+        owasp: 'A07:2021-Identification and Authentication Failures',
+        description: `Real credential or private key was found committed in environment template '${path}' (line ${sec.lineNum}).`,
+        attack_scenario: 'Developers inadvertently committed genuine API tokens or passwords into documentation templates.',
+        file: path,
+        line_hint: sec.lineNum,
+        code_snippet: sec.lineStr,
+        confidence: 'high',
+        fix: `Replace the real value of ${sec.keyName} with a safe placeholder (e.g. YOUR_${sec.keyName}) and revoke the exposed credential.`,
+      });
+    }
+    return findings;
+  }
+
+  if (isRuntimeEnv || path.toLowerCase().endsWith('.env')) {
+    if (realSecretsFound.length > 0) {
+      const first = realSecretsFound[0];
+      const evidence = realSecretsFound.slice(0, 5).map((s) => `Line ${s.lineNum}: ${s.lineStr}`).join('\n');
+      findings.push({
+        title: 'Committed Sensitive Environment File (.env)',
+        severity: 'critical',
+        owasp: 'A05:2021-Security Misconfiguration',
+        description: `Active environment credentials file '${path}' containing live credentials was committed to source control.`,
+        attack_scenario: 'Attackers scraping repository history can extract database credentials, production API tokens, and secret keys.',
+        file: path,
+        line_hint: first.lineNum,
+        code_snippet: evidence,
+        confidence: 'high',
+        fix: 'Remove file from repository history with git-filter-repo and append .env to .gitignore.',
+      });
+    }
+  }
+
+  return findings;
+}
+
 const githubScanCache = new Map<string, { timestamp: number; record: ScanRecord }>();
 const GITHUB_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -938,26 +1085,12 @@ app.post('/api/scan/github', rateLimit(20), async (req, res) => {
             continue;
           }
 
-          // Check committed .env files
-          if (lower.endsWith('.env') || lower.includes('/.env')) {
-            vulns.push({
-              title: 'Committed Sensitive Environment File (.env)',
-              severity: 'critical',
-              owasp: 'A05:2021-Security Misconfiguration',
-              description: `Environment credentials file '${pathStr}' was found committed to public version control.`,
-              attack_scenario: 'Publicly readable database keys, API secrets, and server configuration exposed to any observer.',
-              file: pathStr,
-              line_hint: 1,
-              confidence: 'high',
-              fix: 'Remove file from repository history with git-filter-repo and append .env to .gitignore.',
-            });
-            filesScanned.push(pathStr);
-            continue;
-          }
+          const filenameOnly = pathStr.split('/').pop() || '';
+          const isEnvFile = isCommittedEnvFilename(pathStr) || isEnvTemplateFilename(pathStr) || filenameOnly.startsWith('.env');
 
           const dotIdx = pathStr.lastIndexOf('.');
           const ext = dotIdx !== -1 ? pathStr.slice(dotIdx).toLowerCase() : '';
-          if (scannableExtensions.has(ext)) {
+          if (isEnvFile || scannableExtensions.has(ext)) {
             candidates.push(pathStr);
           } else {
             filesSkipped.push(pathStr);
@@ -975,19 +1108,25 @@ app.post('/api/scan/github', rateLimit(20), async (req, res) => {
             if (rawRes.ok) {
               filesScanned.push(filePath);
               const content = await rawRes.text();
-              for (const pattern of STATIC_SECURITY_PATTERNS) {
-                if (pattern.regex.test(content)) {
-                  vulns.push({
-                    title: `${pattern.title}`,
-                    severity: pattern.severity,
-                    owasp: pattern.owasp,
-                    description: pattern.description,
-                    attack_scenario: pattern.attack_scenario,
-                    file: filePath,
-                    line_hint: 1,
-                    confidence: 'high',
-                    fix: pattern.fix,
-                  });
+              const isEnv = isCommittedEnvFilename(filePath) || isEnvTemplateFilename(filePath) || filePath.split('/').pop()?.startsWith('.env');
+              if (isEnv) {
+                const envFindings = inspectEnvFileContent(content, filePath);
+                vulns.push(...envFindings);
+              } else {
+                for (const pattern of STATIC_SECURITY_PATTERNS) {
+                  if (pattern.regex.test(content)) {
+                    vulns.push({
+                      title: `${pattern.title}`,
+                      severity: pattern.severity,
+                      owasp: pattern.owasp,
+                      description: pattern.description,
+                      attack_scenario: pattern.attack_scenario,
+                      file: filePath,
+                      line_hint: 1,
+                      confidence: 'high',
+                      fix: pattern.fix,
+                    });
+                  }
                 }
               }
             }
@@ -1082,26 +1221,12 @@ app.post('/api/scan/github', rateLimit(20), async (req, res) => {
           continue;
         }
 
-        // Check committed .env files
-        if (lower.endsWith('.env') || lower.includes('/.env')) {
-          vulns.push({
-            title: 'Committed Sensitive Environment File (.env)',
-            severity: 'critical',
-            owasp: 'A05:2021-Security Misconfiguration',
-            description: `Environment credentials file '${normalized}' was found committed to public version control.`,
-            attack_scenario: 'Publicly readable database keys, API secrets, and server configuration exposed to any observer.',
-            file: normalized,
-            line_hint: 1,
-            confidence: 'high',
-            fix: 'Remove file from repository history with git-filter-repo and append .env to .gitignore.',
-          });
-          filesScanned.push(normalized);
-          continue;
-        }
+        const filenameOnly = normalized.split('/').pop() || '';
+        const isEnvFile = isCommittedEnvFilename(normalized) || isEnvTemplateFilename(normalized) || filenameOnly.startsWith('.env');
 
         const dotIdx = normalized.lastIndexOf('.');
         const ext = dotIdx !== -1 ? normalized.slice(dotIdx).toLowerCase() : '';
-        if (scannableExtensions.has(ext)) {
+        if (isEnvFile || scannableExtensions.has(ext)) {
           candidates.push({ path: normalized, file: zipEntry });
         } else {
           filesSkipped.push(normalized);
@@ -1116,19 +1241,25 @@ app.post('/api/scan/github', rateLimit(20), async (req, res) => {
           if (totalUncompressed > 50 * 1024 * 1024) break;
 
           filesScanned.push(item.path);
-          for (const pattern of STATIC_SECURITY_PATTERNS) {
-            if (pattern.regex.test(content)) {
-              vulns.push({
-                title: `${pattern.title}`,
-                severity: pattern.severity,
-                owasp: pattern.owasp,
-                description: pattern.description,
-                attack_scenario: pattern.attack_scenario,
-                file: item.path,
-                line_hint: 1,
-                confidence: 'high',
-                fix: pattern.fix,
-              });
+          const isEnv = isCommittedEnvFilename(item.path) || isEnvTemplateFilename(item.path) || item.path.split('/').pop()?.startsWith('.env');
+          if (isEnv) {
+            const envFindings = inspectEnvFileContent(content, item.path);
+            vulns.push(...envFindings);
+          } else {
+            for (const pattern of STATIC_SECURITY_PATTERNS) {
+              if (pattern.regex.test(content)) {
+                vulns.push({
+                  title: `${pattern.title}`,
+                  severity: pattern.severity,
+                  owasp: pattern.owasp,
+                  description: pattern.description,
+                  attack_scenario: pattern.attack_scenario,
+                  file: item.path,
+                  line_hint: 1,
+                  confidence: 'high',
+                  fix: pattern.fix,
+                });
+              }
             }
           }
         } catch {}

@@ -17,6 +17,7 @@ import logging
 from typing import Dict, Any, List, Set, Optional
 from .code_scanner import scan_code, compute_severity_counts
 from .hallucination import check_npm_package
+from .env_detector import inspect_env_file_content, is_env_template_filename, is_committed_env_filename
 try:
     from models.llm_chain import call_llm
     from models.prompts import HALLUCINATION_PROMPT
@@ -200,6 +201,21 @@ async def scan_upload(
                         all_vulnerabilities.extend(pj_findings)
                         continue
 
+                    filename_only = f.lower()
+                    if (
+                        filename_only.startswith(".env")
+                        or filename_only == ".env"
+                        or is_env_template_filename(rel_p)
+                        or is_committed_env_filename(rel_p)
+                        or ext == ".env"
+                    ):
+                        files_scanned.append(rel_p)
+                        with open(full_p, "r", encoding="utf-8", errors="ignore") as env_f:
+                            env_content = env_f.read(60000)
+                        env_findings = inspect_env_file_content(env_content, rel_p)
+                        all_vulnerabilities.extend(env_findings)
+                        continue
+
                     if ext not in SUPPORTED_EXTENSIONS and not f.startswith(".env"):
                         files_skipped.append(rel_p)
                         continue
@@ -231,7 +247,17 @@ async def scan_upload(
             else:
                 code_text = ""
 
-            if filename.lower() == "package.json":
+            filename_only = filename.lower()
+            if (
+                filename_only.startswith(".env")
+                or filename_only == ".env"
+                or is_env_template_filename(filename)
+                or is_committed_env_filename(filename)
+                or ext == ".env"
+            ):
+                env_findings = inspect_env_file_content(code_text, filename)
+                all_vulnerabilities.extend(env_findings)
+            elif filename.lower() == "package.json":
                 pj_findings = await check_package_json(code_text, filename)
                 all_hallucinations.extend(pj_findings)
                 all_vulnerabilities.extend(pj_findings)

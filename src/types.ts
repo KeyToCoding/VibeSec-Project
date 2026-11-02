@@ -73,6 +73,9 @@ export interface PatchProposalResponse {
   original_code?: string;
   filename?: string;
   language?: string;
+  is_file_level?: boolean;
+  remediation_steps?: string[];
+  recommended_commands?: string[];
 }
 
 export interface PatchVerificationResponse {

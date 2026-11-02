@@ -24,6 +24,7 @@ import httpx
 from .code_scanner import scan_code, compute_severity_counts
 from .file_scanner import SUPPORTED_EXTENSIONS, should_skip_path
 from .url_scanner import check_secrets_in_text
+from .env_detector import inspect_env_file_content, is_env_template_filename, is_committed_env_filename
 
 logger = logging.getLogger("vibesec.github_scanner")
 
@@ -214,26 +215,17 @@ async def _download_and_scan_archive(
             continue
 
         filename_only = normalized.split("/")[-1].lower()
-
-        # Check committed .env files
-        if filename_only.startswith(".env") or filename_only == ".env":
-            all_vulnerabilities.append({
-                "title": "Committed Sensitive Environment File (.env)",
-                "severity": "critical",
-                "owasp": "A05:2021-Security Misconfiguration",
-                "description": f"Environment credentials file '{normalized}' was found committed to public version control.",
-                "attack_scenario": "Attackers scraping public Git history can extract database credentials, API tokens, and secret keys.",
-                "file": normalized,
-                "line_hint": 1,
-                "confidence": "high",
-                "fix": "Remove .env from Git history using git-filter-repo, add .env to .gitignore, and rotate exposed credentials immediately."
-            })
-            files_scanned.append(normalized)
-            continue
-
         dot_idx = normalized.rfind(".")
         ext = normalized[dot_idx:].lower() if dot_idx != -1 else ""
-        if ext in SUPPORTED_EXTENSIONS or filename_only == "package.json":
+
+        if (
+            ext in SUPPORTED_EXTENSIONS
+            or filename_only == "package.json"
+            or filename_only.startswith(".env")
+            or filename_only == ".env"
+            or is_env_template_filename(normalized)
+            or is_committed_env_filename(normalized)
+        ):
             zip_info = archive_zip.getinfo(info)
             candidates.append((normalized, ext, zip_info))
         else:
@@ -252,16 +244,25 @@ async def _download_and_scan_archive(
                 code_text = raw_bytes.decode("utf-8", errors="replace")
 
             files_scanned.append(path)
+            filename_only = path.split("/")[-1].lower()
 
-            # Check hardcoded secrets
-            secrets_found = check_secrets_in_text(code_text, path)
-            all_vulnerabilities.extend(secrets_found)
-
-            # Perform static code analysis
-            lang = SUPPORTED_EXTENSIONS.get(ext, "javascript")
-            scan_rep = await scan_code(code_text[:50000], language=lang, filename=path)
-            all_vulnerabilities.extend(scan_rep.get("vulnerabilities", []))
-            all_hallucinations.extend(scan_rep.get("hallucinated_packages", []))
+            # Dedicated environment and template file inspection
+            if (
+                filename_only.startswith(".env")
+                or filename_only == ".env"
+                or is_env_template_filename(path)
+                or is_committed_env_filename(path)
+                or ext == ".env"
+            ):
+                env_findings = inspect_env_file_content(code_text, path)
+                all_vulnerabilities.extend(env_findings)
+            else:
+                secrets_found = check_secrets_in_text(code_text, path)
+                all_vulnerabilities.extend(secrets_found)
+                lang = SUPPORTED_EXTENSIONS.get(ext, "javascript")
+                scan_rep = await scan_code(code_text[:50000], language=lang, filename=path)
+                all_vulnerabilities.extend(scan_rep.get("vulnerabilities", []))
+                all_hallucinations.extend(scan_rep.get("hallucinated_packages", []))
         except Exception as e_file:
             logger.warning("Error scanning file '%s' from archive: %s", path, e_file)
 
@@ -362,24 +363,16 @@ async def scan_github(repo_url: str, max_files: int = 15) -> Dict[str, Any]:
                             continue
 
                         filename_only = path.split("/")[-1].lower()
-                        if filename_only.startswith(".env") or filename_only == ".env":
-                            all_vulnerabilities.append({
-                                "title": "Committed Sensitive Environment File (.env)",
-                                "severity": "critical",
-                                "owasp": "A05:2021-Security Misconfiguration",
-                                "description": f"Environment file '{path}' is committed directly to public source control.",
-                                "attack_scenario": "Attackers can read private secrets, database connection strings, and production keys.",
-                                "file": path,
-                                "line_hint": 1,
-                                "confidence": "high",
-                                "fix": "Remove .env from Git history using git-filter-repo and add .env to .gitignore."
-                            })
-                            files_scanned.append(path)
-                            continue
-
                         dot_idx = path.rfind(".")
                         ext = path[dot_idx:].lower() if dot_idx != -1 else ""
-                        if ext in SUPPORTED_EXTENSIONS or filename_only == "package.json":
+                        if (
+                            ext in SUPPORTED_EXTENSIONS
+                            or filename_only == "package.json"
+                            or filename_only.startswith(".env")
+                            or filename_only == ".env"
+                            or is_env_template_filename(path)
+                            or is_committed_env_filename(path)
+                        ):
                             candidates.append((path, ext))
                         else:
                             files_skipped.append(path)
@@ -392,12 +385,24 @@ async def scan_github(repo_url: str, max_files: int = 15) -> Dict[str, Any]:
                             if raw_resp.status_code == 200:
                                 files_scanned.append(path)
                                 code_text = raw_resp.text
-                                secrets_found = check_secrets_in_text(code_text, path)
-                                all_vulnerabilities.extend(secrets_found)
-                                lang = SUPPORTED_EXTENSIONS.get(ext, "javascript")
-                                scan_rep = await scan_code(code_text[:50000], language=lang, filename=path)
-                                all_vulnerabilities.extend(scan_rep.get("vulnerabilities", []))
-                                all_hallucinations.extend(scan_rep.get("hallucinated_packages", []))
+                                filename_only = path.split("/")[-1].lower()
+
+                                if (
+                                    filename_only.startswith(".env")
+                                    or filename_only == ".env"
+                                    or is_env_template_filename(path)
+                                    or is_committed_env_filename(path)
+                                    or ext == ".env"
+                                ):
+                                    env_findings = inspect_env_file_content(code_text, path)
+                                    all_vulnerabilities.extend(env_findings)
+                                else:
+                                    secrets_found = check_secrets_in_text(code_text, path)
+                                    all_vulnerabilities.extend(secrets_found)
+                                    lang = SUPPORTED_EXTENSIONS.get(ext, "javascript")
+                                    scan_rep = await scan_code(code_text[:50000], language=lang, filename=path)
+                                    all_vulnerabilities.extend(scan_rep.get("vulnerabilities", []))
+                                    all_hallucinations.extend(scan_rep.get("hallucinated_packages", []))
                         except Exception as e_file:
                             logger.warning("Error fetching raw file %s: %s", path, e_file)
 

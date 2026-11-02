@@ -60,6 +60,11 @@ export const AIFixVerifyModal: React.FC<AIFixVerifyModalProps> = ({
 
   // Resolve active source code to pass to the model
   const activeCode = codeContext || vulnerability.code_snippet || "";
+  const isFileLevelFinding =
+    !activeCode.trim() ||
+    Boolean(proposal?.is_file_level) ||
+    Boolean(vulnerability.title?.toLowerCase().includes(".env")) ||
+    Boolean(vulnerability.title?.toLowerCase().includes("environment file"));
 
   // 1. Propose Patch Handler
   const handleGeneratePatch = async () => {
@@ -290,16 +295,36 @@ export const AIFixVerifyModal: React.FC<AIFixVerifyModalProps> = ({
           {/* STEP 1: INITIAL STATE (Ready to generate) */}
           {step === "initial" && (
             <div className="space-y-4 py-2">
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wider">
-                  <span>Current Vulnerable Code ({language})</span>
+              {isFileLevelFinding && !activeCode.trim() ? (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wider">
+                    <span>Target File ({vulnerability.file || "Repository Finding"})</span>
+                  </div>
+                  <div className="bg-[#0d0d1a] border border-[var(--warning)]/40 rounded-xl p-4 font-mono text-xs space-y-2">
+                    <div className="flex items-center gap-2 text-[var(--warning)] font-bold text-xs font-sans">
+                      <span>📁</span>
+                      <span>File-Level / Environment Configuration Finding</span>
+                    </div>
+                    <p className="text-zinc-300 font-sans text-xs leading-relaxed">
+                      Target: <code className="text-[var(--accent)] font-mono">{vulnerability.file || ".env"}</code>
+                    </p>
+                    <p className="text-zinc-400 font-sans text-xs leading-relaxed">
+                      This finding relates to file-tracking or secret exposure in repository configuration rather than a source-code syntax defect. VibeSec Copilot provides structured, actionable remediation commands to remove the file safely without data loss.
+                    </p>
+                  </div>
                 </div>
-                <div className="bg-[#0d0d1a] border border-[#ef4444]/30 rounded-xl p-3 overflow-x-auto font-mono text-xs max-h-56">
-                  <pre className="text-zinc-300 whitespace-pre">
-                    <code>{activeCode || "No code snippet available."}</code>
-                  </pre>
+              ) : (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wider">
+                    <span>Current Vulnerable Code ({language})</span>
+                  </div>
+                  <div className="bg-[#0d0d1a] border border-[#ef4444]/30 rounded-xl p-3 overflow-x-auto font-mono text-xs max-h-56">
+                    <pre className="text-zinc-300 whitespace-pre">
+                      <code>{activeCode || "No code snippet available."}</code>
+                    </pre>
+                  </div>
                 </div>
-              </div>
+              )}
 
               <div className="p-4 rounded-xl bg-[var(--accent)]/5 border border-[var(--accent)]/20 space-y-2">
                 <h4 className="font-bold text-xs text-[var(--accent)] flex items-center gap-1.5">
@@ -307,10 +332,14 @@ export const AIFixVerifyModal: React.FC<AIFixVerifyModalProps> = ({
                   <span>How AI Fix & Verify Works</span>
                 </h4>
                 <ul className="text-xs text-[var(--text-secondary)] space-y-1 list-disc list-inside">
-                  <li>Ollama (<code className="text-[var(--accent)]">qwen2.5-coder:7b</code>) analyzes the vulnerability and scanner evidence to craft a secure patch.</li>
-                  <li>You review the side-by-side diff and can edit the code directly.</li>
+                  <li>Ollama (<code className="text-[var(--accent)]">qwen2.5-coder:7b</code>) analyzes the vulnerability and scanner evidence to craft safe remediation.</li>
+                  {isFileLevelFinding && !activeCode.trim() ? (
+                    <li>Generates precise terminal commands to untrack files, update .gitignore, and purge Git commit history.</li>
+                  ) : (
+                    <li>You review the side-by-side diff and can edit the code directly.</li>
+                  )}
                   <li>No files or git repos are ever silently modified: changes require explicit approval.</li>
-                  <li>Deterministic scanner rules rerun in an isolated sandbox to verify the fix.</li>
+                  <li>All sandbox protections and user permissions remain strictly enforced.</li>
                 </ul>
               </div>
 
@@ -328,7 +357,7 @@ export const AIFixVerifyModal: React.FC<AIFixVerifyModalProps> = ({
                   className="flex items-center gap-2 px-5 py-2 rounded-xl bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-xs font-bold shadow-md transition-all cursor-pointer"
                 >
                   <span>⚡</span>
-                  <span>Generate Secure Patch</span>
+                  <span>{isFileLevelFinding && !activeCode.trim() ? "Get Remediation Instructions" : "Generate Secure Patch"}</span>
                 </button>
               </div>
             </div>
@@ -356,8 +385,105 @@ export const AIFixVerifyModal: React.FC<AIFixVerifyModalProps> = ({
             </div>
           )}
 
-          {/* STEP 3: REVIEW & EDIT PATCH */}
-          {step === "review" && proposal && (
+          {/* STEP 3: REVIEW & EDIT PATCH OR ACTIONABLE REMEDIATION GUIDE */}
+          {step === "review" && proposal && (proposal.is_file_level || !activeCode.trim()) ? (
+            <div className="space-y-4">
+              {/* Guidance / Explanation Card */}
+              <div className="p-4 rounded-xl bg-[var(--bg-main)] border border-[var(--card-border)] space-y-2">
+                <div className="flex items-center justify-between text-xs font-bold text-[var(--accent)]">
+                  <span className="flex items-center gap-1.5">
+                    <span>💡</span>
+                    <span>Remediation Guidance ({proposal.model_used || "VibeSec Copilot"})</span>
+                  </span>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[var(--accent)]/10 text-[var(--accent)] border border-[var(--accent)]/30">
+                    File-Level Finding
+                  </span>
+                </div>
+                <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
+                  {proposal.explanation}
+                </p>
+              </div>
+
+              {/* Actionable Remediation Checklist */}
+              <div className="p-4 rounded-xl bg-[var(--bg-main)] border border-[var(--card-border)] space-y-2.5">
+                <h4 className="font-bold text-xs text-[var(--text-primary)] flex items-center gap-1.5">
+                  <span>📋</span>
+                  <span>Required Remediation Steps</span>
+                </h4>
+                <div className="space-y-2 text-xs">
+                  {(proposal.remediation_steps || proposal.changes_summary || [
+                    "Remove the file from Git cache without deleting local working copy: git rm --cached <file>",
+                    "Add the filename or pattern to .gitignore.",
+                    "Rotate and invalidate any exposed tokens or credentials immediately.",
+                    "If already committed to remote history, purge using git-filter-repo or BFG Repo-Cleaner."
+                  ]).map((stepText, idx) => (
+                    <div key={idx} className="flex items-start gap-2.5 bg-[var(--card-bg)] p-2.5 rounded-lg border border-[var(--card-border)]">
+                      <span className="w-5 h-5 rounded-full bg-[var(--accent)]/15 text-[var(--accent)] flex items-center justify-center font-bold text-[10px] shrink-0 mt-0.5">
+                        {idx + 1}
+                      </span>
+                      <span className="text-zinc-300 leading-relaxed">{stepText}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Recommended Terminal Commands */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs font-bold text-[var(--text-secondary)]">
+                  <span>Recommended Terminal Commands</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const cmds = (proposal.recommended_commands || []).join("\n");
+                      handleCopyCode(cmds || `git rm --cached ${vulnerability.file || ".env"}`);
+                    }}
+                    className="flex items-center gap-1 text-[11px] text-[var(--accent)] hover:underline cursor-pointer"
+                  >
+                    <span>{copied ? "✓ Copied!" : "📋 Copy Commands"}</span>
+                  </button>
+                </div>
+                <div className="bg-[#0d0d1a] border border-[var(--card-border)] rounded-xl p-3.5 font-mono text-xs text-[#10b981] overflow-x-auto space-y-1">
+                  {(proposal.recommended_commands && proposal.recommended_commands.length > 0
+                    ? proposal.recommended_commands
+                    : [
+                        `# Untrack the sensitive file from git without deleting it locally`,
+                        `git rm --cached ${vulnerability.file || ".env"}`,
+                        `# Ensure it is excluded in .gitignore`,
+                        `echo "${vulnerability.file || ".env"}" >> .gitignore`,
+                        `git add .gitignore`,
+                        `git commit -m "chore: untrack sensitive environment file"`,
+                      ]
+                  ).map((cmd, i) => (
+                    <div key={i} className={cmd.startsWith("#") ? "text-zinc-500 italic" : "text-emerald-400 font-semibold"}>
+                      {cmd}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Sandbox & User Approval Safety Notice */}
+              <div className="p-3.5 rounded-xl bg-[var(--accent)]/5 border border-[var(--accent)]/20 text-xs text-[var(--text-secondary)] space-y-1">
+                <div className="font-bold text-[var(--text-primary)] flex items-center gap-1.5">
+                  <span>🔒</span>
+                  <span>Safety & Repository Protection</span>
+                </div>
+                <p className="text-[11px] leading-relaxed">
+                  VibeSec adheres to zero-trust repository safety: remote repositories and local branches are never modified automatically. Please execute the remediation commands in your local repository terminal.
+                </p>
+              </div>
+
+              {/* Actions */}
+              <div className="flex justify-end gap-3 pt-2 border-t border-[var(--card-border)]">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="px-5 py-2 rounded-xl bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-xs font-bold transition-all shadow-md cursor-pointer"
+                >
+                  Done / Close
+                </button>
+              </div>
+            </div>
+          ) : step === "review" && proposal ? (
             <div className="space-y-4">
               {/* Explanation card */}
               <div className="p-3.5 rounded-xl bg-[var(--bg-main)] border border-[var(--card-border)] space-y-1.5">
@@ -552,7 +678,7 @@ export const AIFixVerifyModal: React.FC<AIFixVerifyModalProps> = ({
                 </div>
               </div>
             </div>
-          )}
+          ) : null}
 
           {/* STEP 4: VERIFYING (Running deterministic rules in sandbox) */}
           {step === "verifying" && (
