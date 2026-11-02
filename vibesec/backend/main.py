@@ -24,7 +24,7 @@ try:
     from .scanner.code_scanner import scan_code
     from .scanner.url_scanner import scan_url
     from .scanner.file_scanner import scan_upload
-    from .scanner.github_scanner import scan_github
+    from .scanner.github_scanner import scan_github, GitHubScanError
     from .database import save_scan_result, get_scan_history, get_scan_by_id
     from .models.llm_chain import (
         OLLAMA_URL, OLLAMA_MODEL, COLAB_NGROK_URL, GROQ_API_KEY, GEMINI_API_KEY,
@@ -36,7 +36,7 @@ except ImportError:
     from scanner.code_scanner import scan_code
     from scanner.url_scanner import scan_url
     from scanner.file_scanner import scan_upload
-    from scanner.github_scanner import scan_github
+    from scanner.github_scanner import scan_github, GitHubScanError
     from database import save_scan_result, get_scan_history, get_scan_by_id
     from models.llm_chain import (
         OLLAMA_URL, OLLAMA_MODEL, COLAB_NGROK_URL, GROQ_API_KEY, GEMINI_API_KEY,
@@ -405,6 +405,9 @@ async def api_scan_github(request: GithubScanRequest, raw_request: Request, resp
 
         save_scan_result(report)
         return report
+    except GitHubScanError as e:
+        logger.warning(f"GitHub scan error ({type(e).__name__}): {e.message}")
+        raise HTTPException(status_code=e.status_code, detail=e.message)
     except Exception as e:
         logger.error(f"GitHub scan error: {e}")
         raise HTTPException(status_code=400, detail=str(e))

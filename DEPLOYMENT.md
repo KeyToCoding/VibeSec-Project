@@ -108,6 +108,7 @@ Deploy this service so its URL is ready for the Express Gateway.
 | `OLLAMA_PROXY_TOKEN` | *(same secret token generated above)* | Bearer token to authenticate with your Windows proxy |
 | `FASTAPI_INTERNAL_TOKEN` | *(e.g. `openssl rand -hex 32`)* | Shared secret with Express API Gateway |
 | `SESSION_SECRET` | *(e.g. `openssl rand -hex 32`)* | Shared HMAC secret for session authentication and history isolation |
+| `GITHUB_TOKEN` | *(optional personal access token)* | Backend-only GitHub PAT. Increases rate limit from 60 to 5,000 req/hr |
 | `GEMINI_API_KEY` | *(leave empty)* | **Optional**. When `AI_PROVIDER=ollama`, Gemini fallback is disabled. |
 
 ---
@@ -128,6 +129,7 @@ Deploy this service so its URL is ready for the Express Gateway.
 | `FASTAPI_URL` | `https://vibesec-backend.onrender.com` | URL of your deployed FastAPI service on Render |
 | `FASTAPI_INTERNAL_TOKEN` | *(same token generated above)* | Matches FastAPI internal auth token |
 | `SESSION_SECRET` | *(same secret generated above)* | Matches FastAPI session HMAC secret |
+| `GITHUB_TOKEN` | *(optional personal access token)* | Backend-only GitHub PAT (keeps rate limit high across shared Render IPs) |
 | `ALLOWED_ORIGINS` | `https://your-site.netlify.app` | Netlify production origin for strict CORS |
 
 ---
@@ -171,6 +173,7 @@ Deploy this service so its URL is ready for the Express Gateway.
 - [x] **Session Isolation**: Client sessions generate and store unique session IDs (`X-Session-ID`), isolating history queries so users cannot inspect other users' scan records.
 - [x] **Internal Service Protection**: FastAPI rejects any requests lacking the `FASTAPI_INTERNAL_TOKEN` (while keeping `/healthz` accessible for Render probes).
 - [x] **Secrets Hygiene**: `.gitignore` excludes all `.env*` files, while preserving `.env.example` templates.
+- [x] **GitHub Scanning Resilience & Zero False Positives**: Captures rate-limit headers (`x-ratelimit-remaining`, `retry-after`), transparently falls back to GitHub's public codeload archive download (`codeload.github.com/${owner}/${repo}/zip/HEAD`), caches scan reports for 10 minutes, and strictly never reports API access errors (403/429) as security vulnerabilities.
 
 ---
 

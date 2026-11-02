@@ -763,7 +763,33 @@ app.post('/api/scan/url', rateLimit(30), async (req, res) => {
   res.json(scanRecord);
 });
 
-// 4. SCAN GITHUB REPOSITORY (with command injection defense & rate limiting)
+// GitHub Headers helper attaching optional GITHUB_TOKEN and GitHub API standards
+function getGitHubHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    'User-Agent': 'VibeSec-GitHub-Scanner/1.0 (NIELIT Gorakhpur Major Project)',
+    'Accept': 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+  };
+  const token = (process.env.GITHUB_TOKEN || '').trim();
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  return headers;
+}
+
+function extractRateLimitHeaders(headers: Headers): Record<string, string> {
+  const info: Record<string, string> = {};
+  for (const key of ['x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset', 'retry-after']) {
+    const val = headers.get(key);
+    if (val !== null) info[key] = val;
+  }
+  return info;
+}
+
+const githubScanCache = new Map<string, { timestamp: number; record: ScanRecord }>();
+const GITHUB_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+// 4. SCAN GITHUB REPOSITORY (with command injection defense, caching, rate limit headers & archive fallback)
 app.post('/api/scan/github', rateLimit(20), async (req, res) => {
   const startTime = Date.now();
   const { repo_url } = req.body;
@@ -771,9 +797,9 @@ app.post('/api/scan/github', rateLimit(20), async (req, res) => {
     return res.status(400).json({ error: 'Valid GitHub repository URL required.' });
   }
 
-  const match = repo_url.match(/github\.com[/:]([\w\-\.]+)\/([\w\-\.]+)/);
+  const match = repo_url.trim().match(/^(?:https?:\/\/)?(?:www\.)?github\.com\/([a-zA-Z0-9_\-\.]+)\/([a-zA-Z0-9_\-\.]+?)(?:\.git)?\/?$/);
   if (!match) {
-    return res.status(400).json({ error: 'Could not parse owner/repo from URL.' });
+    return res.status(400).json({ error: 'Could not parse owner/repo from URL. Must be in format https://github.com/owner/repo' });
   }
 
   const owner = match[1];
@@ -785,95 +811,311 @@ app.post('/api/scan/github', rateLimit(20), async (req, res) => {
     return res.status(400).json({ error: 'Invalid characters in GitHub owner or repository name.' });
   }
 
+  const cacheKey = `${owner.toLowerCase()}/${repo.toLowerCase()}`;
+  const cached = githubScanCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < GITHUB_CACHE_TTL_MS) {
+    const resolvedSession = resolveSessionForScan(req, res);
+    const clone: ScanRecord = {
+      ...cached.record,
+      scan_id: `vibesec-${Date.now()}`,
+      created_at: new Date().toISOString(),
+      session_id: resolvedSession.sessionId,
+      session_token: resolvedSession.sessionToken,
+    };
+    scanHistory.unshift(clone);
+    return res.json(clone);
+  }
+
+  // 1. Try delegating to FastAPI backend if running
+  try {
+    const sessionId = getSessionIdFromReq(req);
+    const backendRes = await fetch(`${FASTAPI_URL}/api/scan/github`, {
+      method: 'POST',
+      headers: getInternalHeaders(req, {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        ...(sessionId ? { 'X-Session-ID': sessionId } : {}),
+      }),
+      body: JSON.stringify({ repo_url }),
+      signal: AbortSignal.timeout(50000),
+    });
+
+    if (backendRes.ok) {
+      const data = await backendRes.json();
+      if (data && typeof data === 'object' && Number(data.files_scanned) > 0) {
+        githubScanCache.set(cacheKey, { timestamp: Date.now(), record: data });
+        scanHistory.unshift(data);
+        return res.json(data);
+      }
+    } else if (backendRes.status === 404 || backendRes.status === 403 || backendRes.status === 400) {
+      const errJson = await backendRes.json().catch(() => null);
+      return res.status(backendRes.status).json(errJson || { error: `GitHub scan failed with status ${backendRes.status}` });
+    }
+  } catch {
+    // Backend unavailable or timed out; proceed to Express standalone scanner
+  }
+
+  // 2. Express standalone scanner with direct public archive fallback
   const vulns: any[] = [];
   const filesScanned: string[] = [];
   const filesSkipped: string[] = [];
+  let needsArchiveDownload = false;
+  let defaultBranch = 'main';
+  let scanMethod = 'rest_api';
 
   try {
-    // 1. Fetch default branch
     const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
-      headers: { 'User-Agent': 'VibeSec-GitHub-Scanner/1.0' },
-      signal: AbortSignal.timeout(8000),
+      headers: getGitHubHeaders(),
+      signal: AbortSignal.timeout(10000),
     });
 
-    if (!repoRes.ok) {
-      throw new Error(`GitHub API returned status ${repoRes.status}`);
+    const rlHeaders = extractRateLimitHeaders(repoRes.headers);
+
+    if (repoRes.status === 404) {
+      return res.status(404).json({
+        error: `GitHub repository '${owner}/${repo}' was not found. Verify the owner and repository name, and ensure the repository is public.`,
+      });
     }
 
-    const repoData = await repoRes.json();
-    const branch = repoData.default_branch || 'main';
+    const isRateLimited =
+      repoRes.status === 429 ||
+      (repoRes.status === 403 && (rlHeaders['x-ratelimit-remaining'] === '0' || (await repoRes.clone().text()).toLowerCase().includes('rate limit')));
 
-    // 2. Fetch git tree
-    const treeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`, {
-      headers: { 'User-Agent': 'VibeSec-GitHub-Scanner/1.0' },
-      signal: AbortSignal.timeout(12000),
-    });
+    if (isRateLimited) {
+      console.warn(`[GitHubScanner] Rate limit reached for ${owner}/${repo} (status ${repoRes.status}). Falling back to archive download.`);
+      needsArchiveDownload = true;
+    } else if (repoRes.status === 401 || repoRes.status === 403) {
+      return res.status(403).json({
+        error: `Access to GitHub repository '${owner}/${repo}' is forbidden. Private repositories cannot be audited without authentication.`,
+      });
+    } else if (!repoRes.ok) {
+      console.warn(`[GitHubScanner] GitHub API returned status ${repoRes.status}. Falling back to archive download.`);
+      needsArchiveDownload = true;
+    } else {
+      const repoData = await repoRes.json();
+      defaultBranch = repoData.default_branch || 'main';
 
-    if (!treeRes.ok) {
-      throw new Error(`Failed to fetch Git tree (status ${treeRes.status})`);
-    }
+      // Fetch git tree
+      const treeRes = await fetch(
+        `https://api.github.com/repos/${owner}/${repo}/git/trees/${defaultBranch}?recursive=1`,
+        {
+          headers: getGitHubHeaders(),
+          signal: AbortSignal.timeout(15000),
+        }
+      );
 
-    const treeData = await treeRes.json();
-    const treeItems = treeData.tree || [];
+      const treeRl = extractRateLimitHeaders(treeRes.headers);
+      const treeRateLimited =
+        treeRes.status === 429 ||
+        (treeRes.status === 403 && (treeRl['x-ratelimit-remaining'] === '0' || (await treeRes.clone().text()).toLowerCase().includes('rate limit')));
 
-    const scannableExtensions = new Set(['.py', '.js', '.ts', '.tsx', '.jsx', '.php', '.java', '.go', '.json', '.env']);
-    const candidates: string[] = [];
-
-    for (const item of treeItems) {
-      if (item.type !== 'blob') continue;
-      const pathStr = item.path as string;
-      const lower = pathStr.toLowerCase();
-
-      // STRICT VENDOR SKIP
-      if (
-        lower.includes('node_modules/') ||
-        lower.includes('.git/') ||
-        lower.includes('__pycache__/') ||
-        lower.includes('.venv/') ||
-        lower.includes('venv/') ||
-        lower.includes('dist/') ||
-        lower.includes('build/') ||
-        lower.endsWith('.min.js')
-      ) {
-        filesSkipped.push(pathStr);
-        continue;
-      }
-
-      // Check committed .env files
-      if (lower.endsWith('.env') || lower.includes('/.env')) {
-        vulns.push({
-          title: 'Committed Sensitive Environment File (.env)',
-          severity: 'critical',
-          owasp: 'A05:2021-Security Misconfiguration',
-          description: `Environment credentials file '${pathStr}' was found committed to public version control.`,
-          attack_scenario: 'Publicly readable database keys, API secrets, and server configuration exposed to any observer.',
-          file: pathStr,
-          line_hint: 1,
-          confidence: 'high',
-          fix: 'Remove file from repository history with git-filter-repo and append .env to .gitignore.',
-        });
-        filesScanned.push(pathStr);
-        continue;
-      }
-
-      const dotIdx = pathStr.lastIndexOf('.');
-      const ext = dotIdx !== -1 ? pathStr.slice(dotIdx).toLowerCase() : '';
-      if (scannableExtensions.has(ext)) {
-        candidates.push(pathStr);
+      if (treeRateLimited || !treeRes.ok) {
+        console.warn(`[GitHubScanner] Tree API failed with status ${treeRes.status}. Falling back to archive download.`);
+        needsArchiveDownload = true;
       } else {
-        filesSkipped.push(pathStr);
+        const treeData = await treeRes.json();
+        const treeItems = treeData.tree || [];
+        const scannableExtensions = new Set(['.py', '.js', '.ts', '.tsx', '.jsx', '.php', '.java', '.go', '.json', '.env']);
+        const candidates: string[] = [];
+
+        for (const item of treeItems) {
+          if (item.type !== 'blob') continue;
+          const pathStr = item.path as string;
+          const lower = pathStr.toLowerCase();
+
+          // Vendor skip
+          if (
+            lower.includes('node_modules/') ||
+            lower.includes('.git/') ||
+            lower.includes('__pycache__/') ||
+            lower.includes('.venv/') ||
+            lower.includes('venv/') ||
+            lower.includes('dist/') ||
+            lower.includes('build/') ||
+            lower.endsWith('.min.js')
+          ) {
+            filesSkipped.push(pathStr);
+            continue;
+          }
+
+          // Check committed .env files
+          if (lower.endsWith('.env') || lower.includes('/.env')) {
+            vulns.push({
+              title: 'Committed Sensitive Environment File (.env)',
+              severity: 'critical',
+              owasp: 'A05:2021-Security Misconfiguration',
+              description: `Environment credentials file '${pathStr}' was found committed to public version control.`,
+              attack_scenario: 'Publicly readable database keys, API secrets, and server configuration exposed to any observer.',
+              file: pathStr,
+              line_hint: 1,
+              confidence: 'high',
+              fix: 'Remove file from repository history with git-filter-repo and append .env to .gitignore.',
+            });
+            filesScanned.push(pathStr);
+            continue;
+          }
+
+          const dotIdx = pathStr.lastIndexOf('.');
+          const ext = dotIdx !== -1 ? pathStr.slice(dotIdx).toLowerCase() : '';
+          if (scannableExtensions.has(ext)) {
+            candidates.push(pathStr);
+          } else {
+            filesSkipped.push(pathStr);
+          }
+        }
+
+        // Scan candidate source files
+        for (const filePath of candidates.slice(0, 15)) {
+          try {
+            const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${defaultBranch}/${filePath}`;
+            const rawRes = await fetch(rawUrl, {
+              headers: getGitHubHeaders(),
+              signal: AbortSignal.timeout(6000),
+            });
+            if (rawRes.ok) {
+              filesScanned.push(filePath);
+              const content = await rawRes.text();
+              for (const pattern of STATIC_SECURITY_PATTERNS) {
+                if (pattern.regex.test(content)) {
+                  vulns.push({
+                    title: `${pattern.title}`,
+                    severity: pattern.severity,
+                    owasp: pattern.owasp,
+                    description: pattern.description,
+                    attack_scenario: pattern.attack_scenario,
+                    file: filePath,
+                    line_hint: 1,
+                    confidence: 'high',
+                    fix: pattern.fix,
+                  });
+                }
+              }
+            }
+          } catch {}
+        }
       }
     }
+  } catch (err: any) {
+    console.warn(`[GitHubScanner] REST API error: ${err.message}. Triggering archive download.`);
+    needsArchiveDownload = true;
+  }
 
-    // Scan up to 8 files
-    for (const filePath of candidates.slice(0, 8)) {
-      filesScanned.push(filePath);
+  // 3. Fallback: Download public archive zip directly
+  if (needsArchiveDownload) {
+    scanMethod = 'archive_download';
+    const archiveUrls = [
+      `https://codeload.github.com/${owner}/${repo}/zip/refs/heads/${defaultBranch}`,
+      `https://github.com/${owner}/${repo}/archive/refs/heads/${defaultBranch}.zip`,
+      `https://codeload.github.com/${owner}/${repo}/zip/HEAD`,
+      `https://github.com/${owner}/${repo}/archive/HEAD.zip`,
+    ];
+
+    let zipBuffer: Buffer | null = null;
+    let archiveStatus = 0;
+
+    for (const url of archiveUrls) {
       try {
-        const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${filePath}`;
-        const rawRes = await fetch(rawUrl, { signal: AbortSignal.timeout(5000) });
-        if (rawRes.ok) {
-          const content = await rawRes.text();
-          // Check static patterns
+        const resp = await fetch(url, {
+          headers: { 'User-Agent': 'VibeSec-GitHub-Scanner/1.0 (NIELIT Gorakhpur Major Project)' },
+          signal: AbortSignal.timeout(20000),
+        });
+        archiveStatus = resp.status;
+        if (resp.ok) {
+          const ab = await resp.arrayBuffer();
+          if (ab.byteLength > 25 * 1024 * 1024) {
+            return res.status(413).json({ error: 'Repository archive exceeds the 25MB safety download limit.' });
+          }
+          zipBuffer = Buffer.from(ab);
+          break;
+        } else if (resp.status === 404) {
+          continue;
+        } else if (resp.status === 401 || resp.status === 403) {
+          return res.status(403).json({ error: `Repository '${owner}/${repo}' is private or inaccessible.` });
+        }
+      } catch {}
+    }
+
+    if (!zipBuffer) {
+      if (archiveStatus === 404) {
+        return res.status(404).json({ error: `GitHub repository '${owner}/${repo}' was not found.` });
+      }
+      return res.status(502).json({ error: `Unable to access repository '${owner}/${repo}' via REST API or archive download.` });
+    }
+
+    try {
+      const zip = await JSZip.loadAsync(zipBuffer);
+      const scannableExtensions = new Set(['.py', '.js', '.ts', '.tsx', '.jsx', '.php', '.java', '.go', '.json', '.env']);
+      const candidates: { path: string; file: any }[] = [];
+      let totalUncompressed = 0;
+
+      for (const [entryPath, zipEntry] of Object.entries(zip.files)) {
+        if (zipEntry.dir) continue;
+
+        // Strip repo prefix
+        const parts = entryPath.split('/');
+        const relPath = parts.slice(1).join('/');
+        const normalized = relPath.replace(/\\/g, '/');
+
+        // Zip-Slip defense
+        if (normalized.includes('../') || normalized.startsWith('/') || normalized.startsWith('../')) {
+          filesSkipped.push(`${relPath} (skipped: illegal path)`);
+          continue;
+        }
+
+        if (candidates.length + filesSkipped.length >= 500) {
+          filesSkipped.push('Remaining archive files (skipped: exceeded 500 files ceiling)');
+          break;
+        }
+
+        const lower = normalized.toLowerCase();
+        if (
+          lower.includes('node_modules/') ||
+          lower.includes('.git/') ||
+          lower.includes('__pycache__/') ||
+          lower.includes('.venv/') ||
+          lower.includes('venv/') ||
+          lower.includes('dist/') ||
+          lower.includes('build/') ||
+          lower.endsWith('.min.js')
+        ) {
+          filesSkipped.push(normalized);
+          continue;
+        }
+
+        // Check committed .env files
+        if (lower.endsWith('.env') || lower.includes('/.env')) {
+          vulns.push({
+            title: 'Committed Sensitive Environment File (.env)',
+            severity: 'critical',
+            owasp: 'A05:2021-Security Misconfiguration',
+            description: `Environment credentials file '${normalized}' was found committed to public version control.`,
+            attack_scenario: 'Publicly readable database keys, API secrets, and server configuration exposed to any observer.',
+            file: normalized,
+            line_hint: 1,
+            confidence: 'high',
+            fix: 'Remove file from repository history with git-filter-repo and append .env to .gitignore.',
+          });
+          filesScanned.push(normalized);
+          continue;
+        }
+
+        const dotIdx = normalized.lastIndexOf('.');
+        const ext = dotIdx !== -1 ? normalized.slice(dotIdx).toLowerCase() : '';
+        if (scannableExtensions.has(ext)) {
+          candidates.push({ path: normalized, file: zipEntry });
+        } else {
+          filesSkipped.push(normalized);
+        }
+      }
+
+      // Scan up to 15 files from archive
+      for (const item of candidates.slice(0, 15)) {
+        try {
+          const content = await item.file.async('text');
+          totalUncompressed += content.length;
+          if (totalUncompressed > 50 * 1024 * 1024) break;
+
+          filesScanned.push(item.path);
           for (const pattern of STATIC_SECURITY_PATTERNS) {
             if (pattern.regex.test(content)) {
               vulns.push({
@@ -882,24 +1124,24 @@ app.post('/api/scan/github', rateLimit(20), async (req, res) => {
                 owasp: pattern.owasp,
                 description: pattern.description,
                 attack_scenario: pattern.attack_scenario,
-                file: filePath,
+                file: item.path,
                 line_hint: 1,
                 confidence: 'high',
                 fix: pattern.fix,
               });
             }
           }
-        }
-      } catch {}
+        } catch {}
+      }
+    } catch (err: any) {
+      return res.status(502).json({ error: `Failed to unpack repository archive: ${err.message}` });
     }
-  } catch (err: any) {
-    vulns.push({
-      title: 'GitHub API Query Issue',
-      severity: 'medium',
-      owasp: 'A05:2021-Security Misconfiguration',
-      description: err?.message || 'Unable to scan repository via GitHub REST API.',
-      file: repo_url,
-      fix: 'Verify repository exists and is public.',
+  }
+
+  // Never report API issues as vulnerabilities, and ensure files were analyzed
+  if (filesScanned.length === 0) {
+    return res.status(422).json({
+      error: `No scannable source code files could be downloaded from repository '${owner}/${repo}'.`,
     });
   }
 
@@ -926,13 +1168,14 @@ app.post('/api/scan/github', rateLimit(20), async (req, res) => {
     severity_counts: counts,
     files_scanned: filesScanned.length,
     files_skipped: filesSkipped.slice(0, 20),
-    summary: `Repository audit of ${owner}/${repo} completed in ${duration}s. Scanned ${filesScanned.length} files (${filesSkipped.length} vendor files skipped). Identified ${vulns.length} vulnerabilities.`,
+    summary: `Repository audit of ${owner}/${repo} (${defaultBranch}) via ${scanMethod} completed in ${duration}s. Scanned ${filesScanned.length} files (${filesSkipped.length} vendor files skipped). Identified ${vulns.length} vulnerabilities.`,
     primary_model: 'VibeSec GitHub Auditor',
     scan_time_seconds: parseFloat(duration),
   };
 
+  githubScanCache.set(cacheKey, { timestamp: Date.now(), record: scanRecord });
   scanHistory.unshift(scanRecord);
-  res.json(scanRecord);
+  return res.json(scanRecord);
 });
 
 // 5. SCAN UPLOAD (Multipart streaming to FastAPI + JSON base64 fallback with 100MB upload & 250MB/500 files unzip limits)
