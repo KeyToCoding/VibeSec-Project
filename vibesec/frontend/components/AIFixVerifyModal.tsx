@@ -14,6 +14,42 @@ export interface AIFixVerifyModalProps {
 
 type StepState = "initial" | "generating" | "review" | "verifying" | "result";
 
+const CODE_FILE_EXTENSIONS = [
+  ".py", ".pyw", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+  ".java", ".go", ".rb", ".php", ".cs", ".cpp", ".c", ".cc", ".cxx",
+  ".h", ".hpp", ".rs", ".swift", ".kt", ".kts", ".html", ".htm",
+  ".css", ".scss", ".sass", ".less", ".vue", ".svelte", ".scala",
+  ".sh", ".bash", ".zsh", ".ps1", ".sql", ".r", ".dart", ".lua"
+];
+
+export function isSourceCodeFilename(pathStr?: string): boolean {
+  if (!pathStr) return false;
+  const normalized = pathStr.replace(/\\/g, "/").toLowerCase();
+  const filename = normalized.split("/").pop() || "";
+  if (["dockerfile", "makefile", "gemfile", "rakefile"].includes(filename)) return true;
+  return CODE_FILE_EXTENSIONS.some((ext) => filename.endsWith(ext));
+}
+
+export function isEnvTemplateFilename(pathStr?: string): boolean {
+  if (!pathStr) return false;
+  const normalized = pathStr.replace(/\\/g, "/").toLowerCase();
+  const filename = normalized.split("/").pop() || "";
+  return [".env.example", ".env.sample", ".env.template", ".env.dist"].some((t) => filename.includes(t)) || filename.endsWith(".example") || filename.endsWith(".sample");
+}
+
+export function isSensitiveConfigFilename(pathStr?: string): boolean {
+  if (!pathStr) return false;
+  const normalized = pathStr.replace(/\\/g, "/").toLowerCase();
+  const filename = normalized.split("/").pop() || "";
+  if (isSourceCodeFilename(filename)) return false;
+  if (isEnvTemplateFilename(filename)) return false;
+  if (filename === ".env" || (filename.startsWith(".env.") && !filename.includes(".example") && !filename.includes(".sample") && !filename.includes(".template"))) return true;
+  if (["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "credentials.json", "secrets.json", "token.json"].includes(filename)) return true;
+  if ([".pem", ".key", ".pkcs12", ".pfx", ".p12"].some((ext) => filename.endsWith(ext))) return true;
+  if (filename.includes("service-account") || filename.includes("client_secret")) return true;
+  return false;
+}
+
 export const AIFixVerifyModal: React.FC<AIFixVerifyModalProps> = ({
   isOpen,
   onClose,
@@ -60,11 +96,16 @@ export const AIFixVerifyModal: React.FC<AIFixVerifyModalProps> = ({
 
   // Resolve active source code to pass to the model
   const activeCode = codeContext || vulnerability.code_snippet || "";
+  const targetPath = vulnerability.file || filename || "";
+  const isSourceFile = isSourceCodeFilename(targetPath);
+  const isSensitiveFile = isSensitiveConfigFilename(targetPath);
+  const isTemplateFile = isEnvTemplateFilename(targetPath);
+
   const isFileLevelFinding =
-    !activeCode.trim() ||
     Boolean(proposal?.is_file_level) ||
-    Boolean(vulnerability.title?.toLowerCase().includes(".env")) ||
-    Boolean(vulnerability.title?.toLowerCase().includes("environment file"));
+    isSensitiveFile ||
+    isTemplateFile ||
+    (!activeCode.trim() && !isSourceFile);
 
   // 1. Propose Patch Handler
   const handleGeneratePatch = async () => {
@@ -295,24 +336,62 @@ export const AIFixVerifyModal: React.FC<AIFixVerifyModalProps> = ({
           {/* STEP 1: INITIAL STATE (Ready to generate) */}
           {step === "initial" && (
             <div className="space-y-4 py-2">
-              {isFileLevelFinding && !activeCode.trim() ? (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wider">
-                    <span>Target File ({vulnerability.file || "Repository Finding"})</span>
-                  </div>
-                  <div className="bg-[#0d0d1a] border border-[var(--warning)]/40 rounded-xl p-4 font-mono text-xs space-y-2">
-                    <div className="flex items-center gap-2 text-[var(--warning)] font-bold text-xs font-sans">
-                      <span>📁</span>
-                      <span>File-Level / Environment Configuration Finding</span>
+              {!activeCode.trim() ? (
+                isSourceFile ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wider">
+                      <span>Target Source File ({targetPath || "app.py"})</span>
                     </div>
-                    <p className="text-zinc-300 font-sans text-xs leading-relaxed">
-                      Target: <code className="text-[var(--accent)] font-mono">{vulnerability.file || ".env"}</code>
-                    </p>
-                    <p className="text-zinc-400 font-sans text-xs leading-relaxed">
-                      This finding relates to file-tracking or secret exposure in repository configuration rather than a source-code syntax defect. VibeSec Copilot provides structured, actionable remediation commands to remove the file safely without data loss.
-                    </p>
+                    <div className="bg-[#0d0d1a] border border-[var(--accent)]/40 rounded-xl p-4 font-mono text-xs space-y-2">
+                      <div className="flex items-center gap-2 text-[var(--accent)] font-bold text-xs font-sans">
+                        <span>📄</span>
+                        <span>Application Source File Finding: {targetPath || "app.py"}</span>
+                      </div>
+                      <p className="text-zinc-300 font-sans text-xs leading-relaxed">
+                        Target: <code className="text-[var(--accent)] font-mono">{targetPath || "app.py"}</code>
+                      </p>
+                      <p className="text-zinc-400 font-sans text-xs leading-relaxed">
+                        This finding affects an application source-code file. The file must <strong>remain tracked</strong> in Git. VibeSec Copilot provides structured instructions to replace hardcoded credentials with environment variables, store secrets in a local untracked <code>.env</code> file, rotate compromised keys, and purge Git history safely without untracking the file or adding it to <code>.gitignore</code>.
+                      </p>
+                    </div>
                   </div>
-                </div>
+                ) : isTemplateFile ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wider">
+                      <span>Environment Template ({targetPath || ".env.example"})</span>
+                    </div>
+                    <div className="bg-[#0d0d1a] border border-[var(--warning)]/40 rounded-xl p-4 font-mono text-xs space-y-2">
+                      <div className="flex items-center gap-2 text-[var(--warning)] font-bold text-xs font-sans">
+                        <span>📝</span>
+                        <span>Environment Template Finding: {targetPath || ".env.example"}</span>
+                      </div>
+                      <p className="text-zinc-300 font-sans text-xs leading-relaxed">
+                        Target: <code className="text-[var(--accent)] font-mono">{targetPath || ".env.example"}</code>
+                      </p>
+                      <p className="text-zinc-400 font-sans text-xs leading-relaxed">
+                        Documentation templates must remain in version control for team onboarding. VibeSec Copilot provides instructions to replace exposed live secrets with safe placeholder values without untracking the template.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wider">
+                      <span>Sensitive Configuration File ({targetPath || ".env"})</span>
+                    </div>
+                    <div className="bg-[#0d0d1a] border border-[#ef4444]/40 rounded-xl p-4 font-mono text-xs space-y-2">
+                      <div className="flex items-center gap-2 text-[#ef4444] font-bold text-xs font-sans">
+                        <span>🔒</span>
+                        <span>Sensitive Configuration / Secret File</span>
+                      </div>
+                      <p className="text-zinc-300 font-sans text-xs leading-relaxed">
+                        Target: <code className="text-[#ef4444] font-mono">{targetPath || ".env"}</code>
+                      </p>
+                      <p className="text-zinc-400 font-sans text-xs leading-relaxed">
+                        This finding relates to an exposed runtime configuration or credentials file. VibeSec Copilot provides safe commands to untrack it from Git cache, add it to <code>.gitignore</code>, and rotate exposed credentials.
+                      </p>
+                    </div>
+                  </div>
+                )
               ) : (
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wider">
@@ -333,8 +412,10 @@ export const AIFixVerifyModal: React.FC<AIFixVerifyModalProps> = ({
                 </h4>
                 <ul className="text-xs text-[var(--text-secondary)] space-y-1 list-disc list-inside">
                   <li>Ollama (<code className="text-[var(--accent)]">qwen2.5-coder:7b</code>) analyzes the vulnerability and scanner evidence to craft safe remediation.</li>
-                  {isFileLevelFinding && !activeCode.trim() ? (
-                    <li>Generates precise terminal commands to untrack files, update .gitignore, and purge Git commit history.</li>
+                  {isSourceFile && !activeCode.trim() ? (
+                    <li>Recommends environment variable replacement, local .env storage, and Git-history cleanup without modifying file tracking.</li>
+                  ) : isFileLevelFinding && !activeCode.trim() ? (
+                    <li>Generates precise terminal commands to untrack sensitive configuration files, update .gitignore, and purge Git history.</li>
                   ) : (
                     <li>You review the side-by-side diff and can edit the code directly.</li>
                   )}
@@ -357,7 +438,7 @@ export const AIFixVerifyModal: React.FC<AIFixVerifyModalProps> = ({
                   className="flex items-center gap-2 px-5 py-2 rounded-xl bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-xs font-bold shadow-md transition-all cursor-pointer"
                 >
                   <span>⚡</span>
-                  <span>{isFileLevelFinding && !activeCode.trim() ? "Get Remediation Instructions" : "Generate Secure Patch"}</span>
+                  <span>{isSourceFile && !activeCode.trim() ? "Get Source Remediation Guide" : isFileLevelFinding && !activeCode.trim() ? "Get Remediation Instructions" : "Generate Secure Patch"}</span>
                 </button>
               </div>
             </div>
@@ -386,104 +467,164 @@ export const AIFixVerifyModal: React.FC<AIFixVerifyModalProps> = ({
           )}
 
           {/* STEP 3: REVIEW & EDIT PATCH OR ACTIONABLE REMEDIATION GUIDE */}
-          {step === "review" && proposal && (proposal.is_file_level || !activeCode.trim()) ? (
-            <div className="space-y-4">
-              {/* Guidance / Explanation Card */}
-              <div className="p-4 rounded-xl bg-[var(--bg-main)] border border-[var(--card-border)] space-y-2">
-                <div className="flex items-center justify-between text-xs font-bold text-[var(--accent)]">
-                  <span className="flex items-center gap-1.5">
-                    <span>💡</span>
-                    <span>Remediation Guidance ({proposal.model_used || "VibeSec Copilot"})</span>
-                  </span>
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[var(--accent)]/10 text-[var(--accent)] border border-[var(--accent)]/30">
-                    File-Level Finding
-                  </span>
-                </div>
-                <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
-                  {proposal.explanation}
-                </p>
-              </div>
+          {step === "review" && proposal && (proposal.is_file_level || !activeCode.trim()) ? (() => {
+            const isSourceRemediation = proposal.remediation_category === "source_code" || (!proposal.remediation_category && isSourceFile);
+            const isTemplateRemediation = proposal.remediation_category === "env_template" || (!proposal.remediation_category && isTemplateFile);
+            const isSensitiveRemediation = proposal.remediation_category === "sensitive_config" || (!proposal.remediation_category && isSensitiveFile);
 
-              {/* Actionable Remediation Checklist */}
-              <div className="p-4 rounded-xl bg-[var(--bg-main)] border border-[var(--card-border)] space-y-2.5">
-                <h4 className="font-bold text-xs text-[var(--text-primary)] flex items-center gap-1.5">
-                  <span>📋</span>
-                  <span>Required Remediation Steps</span>
-                </h4>
-                <div className="space-y-2 text-xs">
-                  {(proposal.remediation_steps || proposal.changes_summary || [
-                    "Remove the file from Git cache without deleting local working copy: git rm --cached <file>",
-                    "Add the filename or pattern to .gitignore.",
-                    "Rotate and invalidate any exposed tokens or credentials immediately.",
-                    "If already committed to remote history, purge using git-filter-repo or BFG Repo-Cleaner."
-                  ]).map((stepText, idx) => (
-                    <div key={idx} className="flex items-start gap-2.5 bg-[var(--card-bg)] p-2.5 rounded-lg border border-[var(--card-border)]">
-                      <span className="w-5 h-5 rounded-full bg-[var(--accent)]/15 text-[var(--accent)] flex items-center justify-center font-bold text-[10px] shrink-0 mt-0.5">
-                        {idx + 1}
-                      </span>
-                      <span className="text-zinc-300 leading-relaxed">{stepText}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
+            const badgeText = isSourceRemediation
+              ? "Application Source File (Keep Tracked)"
+              : isTemplateRemediation
+              ? "Environment Template (Keep Tracked)"
+              : isSensitiveRemediation
+              ? "Sensitive Configuration File (Untrack)"
+              : "File-Level Remediation";
 
-              {/* Recommended Terminal Commands */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-xs font-bold text-[var(--text-secondary)]">
-                  <span>Recommended Terminal Commands</span>
+            const badgeClass = isSourceRemediation
+              ? "bg-[#10b981]/15 text-[#10b981] border-[#10b981]/40"
+              : isTemplateRemediation
+              ? "bg-[var(--warning)]/15 text-[var(--warning)] border-[var(--warning)]/40"
+              : "bg-[#ef4444]/15 text-[#ef4444] border-[#ef4444]/40";
+
+            const fallbackSteps = isSourceRemediation
+              ? [
+                  `Keep '${targetPath || "source file"}' tracked in Git. Never run git rm --cached on application source code and never add '${targetPath || "source file"}' to .gitignore.`,
+                  "Extract hardcoded credentials into an environment variable loaded at runtime (e.g., os.getenv or process.env).",
+                  "Store secrets in a local untracked .env file and ensure .env is listed in .gitignore.",
+                  "Rotate and invalidate any exposed tokens or credentials immediately in the external service provider.",
+                  "If the secret was already committed, purge the secret from Git history using git-filter-repo --replace-text expressions.txt."
+                ]
+              : isTemplateRemediation
+              ? [
+                  `Keep '${targetPath || "template file"}' tracked in Git for developer onboarding.`,
+                  "Replace any real credentials with safe placeholder values (e.g. YOUR_API_KEY).",
+                  "Rotate and invalidate any exposed tokens or credentials immediately.",
+                  "Commit the sanitized template file to Git."
+                ]
+              : [
+                  `Untrack the sensitive file from Git cache without deleting the local file: git rm --cached ${targetPath || ".env"}`,
+                  "Add the filename or pattern to .gitignore.",
+                  "Rotate and invalidate any exposed tokens or credentials immediately.",
+                  "If already committed to remote history, purge using git-filter-repo or BFG Repo-Cleaner."
+                ];
+
+            const fallbackCommands = isSourceRemediation
+              ? [
+                  `# 1. KEEP '${targetPath || "source file"}' tracked in Git. Do NOT run git rm --cached.`,
+                  `# 2. Add the secret to your local untracked .env file:`,
+                  `echo "API_KEY=your_actual_key_here" >> .env`,
+                  `# 3. Verify that .env is excluded from Git:`,
+                  `git status --ignored`,
+                  `# 4. Invalidate and rotate the exposed credential in the provider dashboard immediately`,
+                  `# 5. If committed, purge secret from history: git-filter-repo --replace-text expressions.txt`
+                ]
+              : isTemplateRemediation
+              ? [
+                  `# Keep template tracked in Git; sanitize any real secrets with placeholders`,
+                  `git add ${targetPath || ".env.example"}`,
+                  `git commit -m "chore: sanitize template placeholders"`,
+                  `# Rotate exposed credential immediately`
+                ]
+              : [
+                  `# Untrack the sensitive file from git without deleting it locally`,
+                  `git rm --cached ${targetPath || ".env"}`,
+                  `# Ensure it is excluded in .gitignore`,
+                  `echo "${targetPath || ".env"}" >> .gitignore`,
+                  `git add .gitignore`,
+                  `git commit -m "chore: untrack sensitive environment file"`,
+                ];
+
+            const displaySteps = proposal.remediation_steps && proposal.remediation_steps.length > 0
+              ? proposal.remediation_steps
+              : (proposal.changes_summary && proposal.changes_summary.length > 0 ? proposal.changes_summary : fallbackSteps);
+
+            const displayCommands = proposal.recommended_commands && proposal.recommended_commands.length > 0
+              ? proposal.recommended_commands
+              : fallbackCommands;
+
+            const copyPayload = displayCommands.join("\n");
+
+            return (
+              <div className="space-y-4">
+                {/* Guidance / Explanation Card */}
+                <div className="p-4 rounded-xl bg-[var(--bg-main)] border border-[var(--card-border)] space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold text-[var(--accent)]">
+                    <span className="flex items-center gap-1.5">
+                      <span>💡</span>
+                      <span>Remediation Guidance ({proposal.model_used || "VibeSec Copilot"})</span>
+                    </span>
+                    <span className={`text-[10px] font-mono px-2 py-0.5 rounded border ${badgeClass}`}>
+                      {badgeText}
+                    </span>
+                  </div>
+                  <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
+                    {proposal.explanation}
+                  </p>
+                </div>
+
+                {/* Actionable Remediation Checklist */}
+                <div className="p-4 rounded-xl bg-[var(--bg-main)] border border-[var(--card-border)] space-y-2.5">
+                  <h4 className="font-bold text-xs text-[var(--text-primary)] flex items-center gap-1.5">
+                    <span>📋</span>
+                    <span>Required Remediation Steps</span>
+                  </h4>
+                  <div className="space-y-2 text-xs">
+                    {displaySteps.map((stepText, idx) => (
+                      <div key={idx} className="flex items-start gap-2.5 bg-[var(--card-bg)] p-2.5 rounded-lg border border-[var(--card-border)]">
+                        <span className="w-5 h-5 rounded-full bg-[var(--accent)]/15 text-[var(--accent)] flex items-center justify-center font-bold text-[10px] shrink-0 mt-0.5">
+                          {idx + 1}
+                        </span>
+                        <span className="text-zinc-300 leading-relaxed">{stepText}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Recommended Terminal Commands */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs font-bold text-[var(--text-secondary)]">
+                    <span>Recommended Terminal Commands</span>
+                    <button
+                      type="button"
+                      onClick={() => handleCopyCode(copyPayload)}
+                      className="flex items-center gap-1 text-[11px] text-[var(--accent)] hover:underline cursor-pointer"
+                    >
+                      <span>{copied ? "✓ Copied!" : "📋 Copy Commands"}</span>
+                    </button>
+                  </div>
+                  <div className="bg-[#0d0d1a] border border-[var(--card-border)] rounded-xl p-3.5 font-mono text-xs overflow-x-auto space-y-1">
+                    {displayCommands.map((cmd, i) => (
+                      <div key={i} className={cmd.startsWith("#") ? "text-zinc-500 italic" : "text-emerald-400 font-semibold"}>
+                        {cmd}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Sandbox & User Approval Safety Notice */}
+                <div className="p-3.5 rounded-xl bg-[var(--accent)]/5 border border-[var(--accent)]/20 text-xs text-[var(--text-secondary)] space-y-1">
+                  <div className="font-bold text-[var(--text-primary)] flex items-center gap-1.5">
+                    <span>🔒</span>
+                    <span>Safety & Repository Protection</span>
+                  </div>
+                  <p className="text-[11px] leading-relaxed">
+                    VibeSec adheres to zero-trust repository safety: remote repositories and local branches are never modified automatically. Please execute the remediation commands in your local repository terminal.
+                  </p>
+                </div>
+
+                {/* Actions */}
+                <div className="flex justify-end gap-3 pt-2 border-t border-[var(--card-border)]">
                   <button
                     type="button"
-                    onClick={() => {
-                      const cmds = (proposal.recommended_commands || []).join("\n");
-                      handleCopyCode(cmds || `git rm --cached ${vulnerability.file || ".env"}`);
-                    }}
-                    className="flex items-center gap-1 text-[11px] text-[var(--accent)] hover:underline cursor-pointer"
+                    onClick={onClose}
+                    className="px-5 py-2 rounded-xl bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-xs font-bold transition-all shadow-md cursor-pointer"
                   >
-                    <span>{copied ? "✓ Copied!" : "📋 Copy Commands"}</span>
+                    Done / Close
                   </button>
                 </div>
-                <div className="bg-[#0d0d1a] border border-[var(--card-border)] rounded-xl p-3.5 font-mono text-xs text-[#10b981] overflow-x-auto space-y-1">
-                  {(proposal.recommended_commands && proposal.recommended_commands.length > 0
-                    ? proposal.recommended_commands
-                    : [
-                        `# Untrack the sensitive file from git without deleting it locally`,
-                        `git rm --cached ${vulnerability.file || ".env"}`,
-                        `# Ensure it is excluded in .gitignore`,
-                        `echo "${vulnerability.file || ".env"}" >> .gitignore`,
-                        `git add .gitignore`,
-                        `git commit -m "chore: untrack sensitive environment file"`,
-                      ]
-                  ).map((cmd, i) => (
-                    <div key={i} className={cmd.startsWith("#") ? "text-zinc-500 italic" : "text-emerald-400 font-semibold"}>
-                      {cmd}
-                    </div>
-                  ))}
-                </div>
               </div>
-
-              {/* Sandbox & User Approval Safety Notice */}
-              <div className="p-3.5 rounded-xl bg-[var(--accent)]/5 border border-[var(--accent)]/20 text-xs text-[var(--text-secondary)] space-y-1">
-                <div className="font-bold text-[var(--text-primary)] flex items-center gap-1.5">
-                  <span>🔒</span>
-                  <span>Safety & Repository Protection</span>
-                </div>
-                <p className="text-[11px] leading-relaxed">
-                  VibeSec adheres to zero-trust repository safety: remote repositories and local branches are never modified automatically. Please execute the remediation commands in your local repository terminal.
-                </p>
-              </div>
-
-              {/* Actions */}
-              <div className="flex justify-end gap-3 pt-2 border-t border-[var(--card-border)]">
-                <button
-                  type="button"
-                  onClick={onClose}
-                  className="px-5 py-2 rounded-xl bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-xs font-bold transition-all shadow-md cursor-pointer"
-                >
-                  Done / Close
-                </button>
-              </div>
-            </div>
-          ) : step === "review" && proposal ? (
+            );
+          })() : step === "review" && proposal ? (
             <div className="space-y-4">
               {/* Explanation card */}
               <div className="p-3.5 rounded-xl bg-[var(--bg-main)] border border-[var(--card-border)] space-y-1.5">

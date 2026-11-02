@@ -32,6 +32,7 @@ try:
         LLMProviderError, LLMTimeoutError, OLLAMA_HEADERS,
     )
     from .remediation import propose_remediation_patch, verify_remediation_patch
+    from .scanner.env_detector import is_sensitive_config_file
 except ImportError:
     from scanner.code_scanner import scan_code
     from scanner.url_scanner import scan_url
@@ -44,6 +45,7 @@ except ImportError:
         LLMProviderError, LLMTimeoutError, OLLAMA_HEADERS,
     )
     from remediation import propose_remediation_patch, verify_remediation_patch
+    from scanner.env_detector import is_sensitive_config_file
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("vibesec.api")
@@ -612,6 +614,7 @@ async def api_propose_patch(req: ProposePatchRequest):
         "environment file" in vuln_title
         or ".env" in vuln_file
         or "template" in vuln_title
+        or is_sensitive_config_file(vuln_file)
         or not snippet
     )
 

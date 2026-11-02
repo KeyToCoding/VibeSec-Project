@@ -19,10 +19,22 @@ try:
     from ..models.llm_chain import call_llm, LLMTimeoutError, LLMProviderError
     from ..scanner.semgrep_runner import semgrep_scan, native_fallback_scan
     from ..scanner.code_scanner import compute_severity_counts
+    from ..scanner.env_detector import (
+        classify_file_for_remediation,
+        is_source_code_file,
+        is_sensitive_config_file,
+        is_env_template_filename,
+    )
 except (ImportError, ValueError):
     from models.llm_chain import call_llm, LLMTimeoutError, LLMProviderError
     from scanner.semgrep_runner import semgrep_scan, native_fallback_scan
     from scanner.code_scanner import compute_severity_counts
+    from scanner.env_detector import (
+        classify_file_for_remediation,
+        is_source_code_file,
+        is_sensitive_config_file,
+        is_env_template_filename,
+    )
 
 logger = logging.getLogger("vibesec.remediation")
 
@@ -121,24 +133,150 @@ async def propose_remediation_patch(
     target_file = vulnerability.get("file", filename or "file")
     fix_text = vulnerability.get("fix", "")
 
-    # Handle file-level or environment findings without a code snippet
+    # Handle file-level findings or findings without source code snippets
     if not code_text and not snippet:
-        lower_title = title.lower()
-        lower_file = target_file.lower()
+        file_category = classify_file_for_remediation(target_file, title)
+        filename_only = target_file.replace("\\", "/").split("/")[-1]
 
-        if "environment file" in lower_title or ".env" in lower_file or "template" in lower_title or "credential" in lower_title:
+        if file_category == "source_code":
+            ext = "." + filename_only.split(".")[-1].lower() if "." in filename_only else ""
+            if ext in (".py", ".pyw"):
+                env_syntax = 'API_KEY = os.getenv("API_KEY")'
+            elif ext in (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"):
+                env_syntax = 'const apiKey = process.env.API_KEY;'
+            elif ext == ".go":
+                env_syntax = 'apiKey := os.Getenv("API_KEY")'
+            elif ext in (".java", ".kt"):
+                env_syntax = 'String apiKey = System.getenv("API_KEY");'
+            elif ext == ".php":
+                env_syntax = '$apiKey = getenv("API_KEY");'
+            elif ext == ".rb":
+                env_syntax = 'api_key = ENV["API_KEY"]'
+            else:
+                env_syntax = 'API_KEY = get_env("API_KEY")'
+
+            explanation = (
+                f"Finding '{title}' was detected in application source file '{target_file}'. "
+                f"Important: '{filename_only}' is an application source-code file and must REMAIN tracked in Git. "
+                f"Never remove application source files from Git tracking and never add '{filename_only}' to .gitignore. "
+                f"Instead, replace the hardcoded credential with a runtime environment variable ({env_syntax}), "
+                f"store the live secret in a local untracked .env file, rotate the exposed secret immediately, "
+                f"and scrub commit history using git-filter-repo."
+            )
+
+            remediation_steps = [
+                f"Keep '{target_file}' tracked in Git. Never remove application source files from Git tracking and never add '{filename_only}' to .gitignore.",
+                f"Extract the hardcoded secret to an environment variable in '{filename_only}': {env_syntax}",
+                "Store the actual credential in a local environment file (.env) that is listed in .gitignore.",
+                "Immediately revoke and rotate the exposed secret with your credential/cloud provider.",
+                "If the secret was already pushed to remote version control, scrub historical commits using git-filter-repo without deleting the file."
+            ]
+
+            recommended_commands = [
+                f"# 1. KEEP '{filename_only}' tracked in Git (do NOT run git rm on application source files)",
+                f"# 2. Add your secret to a local .env file (ensure .env is listed in .gitignore):",
+                f'echo "API_KEY=your_actual_key_here" >> .env',
+                f"# 3. Verify .env is excluded by git:",
+                f"git status --ignored",
+                f"# 4. Invalidate and rotate the exposed credential with your service provider immediately.",
+                f"# 5. If previously committed to remote history, purge the secret string using git-filter-repo:",
+                f"#    git-filter-repo --replace-text expressions.txt",
+            ]
+
+            return {
+                "success": True,
+                "is_file_level": True,
+                "remediation_category": "source_code",
+                "remediation_type": "source_code_credential",
+                "title": title,
+                "filename": target_file,
+                "explanation": explanation,
+                "remediation_steps": remediation_steps,
+                "recommended_commands": recommended_commands,
+                "patched_code": "",
+                "unified_diff": "",
+                "changes_summary": remediation_steps,
+                "model_used": "VibeSec Remediation Copilot",
+                "disclaimer": SECURITY_DISCLAIMER,
+            }
+
+        elif file_category == "env_template":
+            explanation = (
+                f"Finding '{title}' was detected in environment template '{target_file}'. "
+                "Templates must remain tracked in version control for team onboarding. "
+                "Do NOT untrack this template file. Replace the real credential with a safe placeholder (e.g. YOUR_API_KEY_HERE)."
+            )
+            remediation_steps = [
+                f"Keep '{target_file}' tracked in Git for developer onboarding.",
+                f"Replace the genuine credential on line {line_hint} with a dummy placeholder (e.g. YOUR_KEY_HERE).",
+                "Immediately rotate and invalidate the exposed credential with your service provider.",
+                f"Commit the sanitized template: git commit -m \"chore: sanitize secrets in {target_file}\"",
+                "If the live secret was pushed to remote Git history, scrub historical commits using git-filter-repo."
+            ]
+            recommended_commands = [
+                f"# 1. Keep {target_file} tracked in Git. Replace secret with placeholder (e.g. YOUR_API_KEY)",
+                f"# 2. Rotate the exposed key in your provider's console immediately",
+                f"git add {target_file}",
+                f"git commit -m \"chore: replace exposed secret in {target_file} with placeholder\"",
+                f"# 3. If pushed to remote history, purge with git-filter-repo:",
+                f"#    git-filter-repo --replace-text expressions.txt"
+            ]
+            return {
+                "success": True,
+                "is_file_level": True,
+                "remediation_category": "env_template",
+                "remediation_type": "template_sanitization",
+                "title": title,
+                "filename": target_file,
+                "explanation": explanation,
+                "remediation_steps": remediation_steps,
+                "recommended_commands": recommended_commands,
+                "patched_code": "",
+                "unified_diff": "",
+                "changes_summary": remediation_steps,
+                "model_used": "VibeSec Remediation Copilot",
+                "disclaimer": SECURITY_DISCLAIMER,
+            }
+
+        elif file_category == "sensitive_config":
+            explanation = (
+                f"Finding '{title}' is an exposed sensitive configuration/credential file '{target_file}'. "
+                "Active environment credentials and private key files should never be committed to public or shared version control. "
+                "Untrack the file from Git cache, add it to .gitignore, and revoke exposed secrets."
+            )
             remediation_steps = [
                 f"Remove '{target_file}' from Git tracking: git rm --cached {target_file}",
                 f"Add '{target_file}' to .gitignore to ensure sensitive credentials are never committed.",
-                f"Commit the removal: git commit -m \"chore: remove {target_file} from version control tracking\"",
-                "If credentials were ever pushed to a public remote repository, rewrite history using git-filter-repo or BFG Repo-Cleaner.",
-                "Revoke and rotate any exposed API keys, passwords, database URLs, and session secrets immediately."
+                f"Commit the untracking: git commit -m \"chore: untrack sensitive {target_file}\"",
+                "Immediately revoke and rotate any exposed API keys, passwords, database URLs, and tokens.",
+                "If credentials were pushed to a public remote repository, rewrite history using git-filter-repo or BFG Repo-Cleaner."
             ]
             recommended_commands = [
                 f"git rm --cached {target_file}",
                 f"echo \"{target_file}\" >> .gitignore",
-                "git commit -m \"chore: untrack sensitive environment file\"",
+                f"git add .gitignore",
+                f"git commit -m \"chore: untrack sensitive {target_file}\"",
+                f"# Rotate all exposed credentials immediately",
+                f"# If committed to remote history, purge using git-filter-repo:",
+                f"# git-filter-repo --path {target_file} --invert-paths"
             ]
+            return {
+                "success": True,
+                "is_file_level": True,
+                "remediation_category": "sensitive_config",
+                "remediation_type": "sensitive_file_untrack",
+                "title": title,
+                "filename": target_file,
+                "explanation": explanation,
+                "remediation_steps": remediation_steps,
+                "recommended_commands": recommended_commands,
+                "patched_code": "",
+                "unified_diff": "",
+                "changes_summary": remediation_steps,
+                "model_used": "VibeSec Remediation Copilot",
+                "disclaimer": SECURITY_DISCLAIMER,
+            }
+
         else:
             remediation_steps = [
                 f"Review repository and filesystem permissions for '{target_file}'.",
@@ -149,30 +287,28 @@ async def propose_remediation_patch(
             recommended_commands = [
                 f"# Inspect file status:\ngit status {target_file}",
             ]
-
-        explanation = (
-            fix_text or (
-                f"Finding '{title}' is an environment/repository configuration issue for '{target_file}'. "
-                "Because this flaw is at the file and Git-tracking level rather than inline syntax, "
-                "an automated code diff is not applicable. Follow the actionable remediation steps below."
+            explanation = (
+                fix_text or (
+                    f"Finding '{title}' is an environment/repository configuration issue for '{target_file}'. "
+                    "Follow the actionable remediation steps below."
+                )
             )
-        )
-
-        return {
-            "success": True,
-            "is_file_level": True,
-            "remediation_type": "actionable_instructions",
-            "title": title,
-            "filename": target_file,
-            "explanation": explanation,
-            "remediation_steps": remediation_steps,
-            "recommended_commands": recommended_commands,
-            "patched_code": "",
-            "unified_diff": "",
-            "changes_summary": remediation_steps,
-            "model_used": "VibeSec Remediation Copilot",
-            "disclaimer": SECURITY_DISCLAIMER,
-        }
+            return {
+                "success": True,
+                "is_file_level": True,
+                "remediation_category": "generic",
+                "remediation_type": "actionable_instructions",
+                "title": title,
+                "filename": target_file,
+                "explanation": explanation,
+                "remediation_steps": remediation_steps,
+                "recommended_commands": recommended_commands,
+                "patched_code": "",
+                "unified_diff": "",
+                "changes_summary": remediation_steps,
+                "model_used": "VibeSec Remediation Copilot",
+                "disclaimer": SECURITY_DISCLAIMER,
+            }
 
     # Code snippet is available
     active_code = code_text if code_text else snippet

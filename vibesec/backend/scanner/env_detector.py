@@ -83,6 +83,113 @@ def is_committed_env_filename(path: str) -> bool:
     return False
 
 
+COMMON_SOURCE_CODE_EXTENSIONS = {
+    ".py", ".pyw", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+    ".java", ".go", ".rb", ".php", ".cs", ".cpp", ".c", ".cc", ".cxx",
+    ".h", ".hpp", ".rs", ".swift", ".kt", ".kts", ".html", ".htm",
+    ".css", ".scss", ".sass", ".less", ".vue", ".svelte", ".scala",
+    ".sh", ".bash", ".zsh", ".ps1", ".psm1", ".sql", ".r", ".dart",
+    ".lua", ".pl", ".pm", ".ex", ".exs", ".erl", ".hrl", ".clj",
+    ".cljs", ".elm", ".fs", ".hs", ".asm", ".sol"
+}
+
+
+def is_source_code_file(path: str) -> bool:
+    """Determine if a file is an application source-code file.
+
+    Application source files (e.g. app.py, index.js, server.ts, main.go)
+    must NEVER be removed from Git tracking or added to .gitignore merely
+    because they contain a hardcoded credential.
+    """
+    if not path:
+        return False
+    normalized = path.replace("\\", "/").lower()
+    filename = normalized.split("/")[-1]
+
+    if filename in ("dockerfile", "makefile", "gemfile", "rakefile", "cmakelists.txt"):
+        return True
+
+    dot_idx = filename.rfind(".")
+    if dot_idx != -1:
+        ext = filename[dot_idx:]
+        if ext in COMMON_SOURCE_CODE_EXTENSIONS:
+            return True
+
+    return False
+
+
+def is_sensitive_config_file(path: str) -> bool:
+    """Determine if a file is a sensitive credential/secret configuration file.
+
+    Only genuine secret files (.env, private keys, service account JSON)
+    should ever be untracked (git rm --cached) and added to .gitignore.
+    Application source files (app.py) and documentation templates (.env.example)
+    are strictly excluded.
+    """
+    if not path:
+        return False
+    normalized = path.replace("\\", "/").lower()
+    filename = normalized.split("/")[-1]
+
+    # Explicitly exclude templates
+    if is_env_template_filename(filename):
+        return False
+
+    # Explicitly exclude application source code files (e.g., app.py, config.py)
+    if is_source_code_file(filename):
+        return False
+
+    # Runtime environment files (.env, .env.local, .env.production, etc.)
+    if is_committed_env_filename(filename):
+        return True
+
+    # Cryptographic private keys
+    if filename in ("id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"):
+        return True
+    if any(filename.endswith(ext) for ext in (".pem", ".key", ".pkcs12", ".pfx", ".p12")):
+        return True
+
+    # Dedicated credentials, tokens, service accounts
+    if filename in (
+        "credentials.json", "service-account.json", "service_account.json",
+        "secrets.json", "token.json", "client_secret.json", "client_secrets.json",
+        ".htpasswd", "htpasswd", "shadow", "master.key"
+    ):
+        return True
+    if re.search(r"(service[-_]account|client[-_]secret|google[-_]credentials|firebase[-_]adminsdk).*\.json$", filename):
+        return True
+
+    # Package registry / tool secrets
+    if filename in (".npmrc", ".pypirc", ".dockercfg"):
+        return True
+
+    return False
+
+
+def classify_file_for_remediation(path: str, title: str = "") -> str:
+    """Classify a finding target for safe remediation guidance.
+
+    Returns:
+        'source_code'      -> Application source files (e.g. app.py, server.ts).
+                              Keep in Git; extract secret to environment variable.
+        'sensitive_config' -> Pure credentials file (e.g. .env, id_rsa).
+                              Untrack with git rm --cached and add to .gitignore.
+        'env_template'     -> Documentation template (e.g. .env.example).
+                              Keep in Git; sanitize real secret to placeholder.
+        'generic'          -> Other files.
+    """
+    if not path:
+        return "generic"
+    if is_env_template_filename(path):
+        return "env_template"
+    if is_source_code_file(path):
+        return "source_code"
+    if is_sensitive_config_file(path):
+        return "sensitive_config"
+    return "generic"
+
+
+
 def is_placeholder_value(val: str) -> bool:
     """Determine if an environment variable value is a dummy/template placeholder."""
     cleaned = val.strip().strip("'\"").strip()

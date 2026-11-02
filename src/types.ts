@@ -74,6 +74,8 @@ export interface PatchProposalResponse {
   filename?: string;
   language?: string;
   is_file_level?: boolean;
+  remediation_category?: 'source_code' | 'sensitive_config' | 'env_template' | 'generic';
+  remediation_type?: string;
   remediation_steps?: string[];
   recommended_commands?: string[];
 }
