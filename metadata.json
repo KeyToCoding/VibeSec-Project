@@ -1,0 +1,6 @@
+{
+  "name": "VibeSec - AI Security Scanner",
+  "description": "AI-powered security scanner for AI-generated code featuring SAST, deep LLM vulnerability analysis, npm/PyPI hallucination detection, and multi-input scanning for code, URLs, ZIP archives, and GitHub repos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

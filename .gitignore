@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Production builds
+dist/
+build/
+coverage/
+
+# Virtual Environments
+.venv/
+.semgrep-env/
+vibesec/backend/.venv/
+vibesec/backend/.semgrep-env/
+venv/
+env/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pytest_cache/
+.mypy_cache/
+
+# Logs and Process Tracking
+logs/
+*.log
+vibesec-pids.json
+*.pid
+
+# Deployment artifacts
+.netlify/
+.render/
+
+# Environment and Secrets
+.env*
+!.env.example
+!**/.env.example
+
+# OS artifacts
+.DS_Store
+Thumbs.db

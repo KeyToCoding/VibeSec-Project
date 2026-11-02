@@ -1,0 +1,25 @@
+# Netlify Configuration for VibeSec Frontend (React + Vite)
+# Production builds publish from dist/ and use SPA rewrite to index.html
+# API requests go directly to Render Express API via VITE_API_BASE_URL (not proxied through Netlify).
+
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+# SPA Fallback: All client-side routes redirect to index.html with 200
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# Security Headers for production frontend
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
