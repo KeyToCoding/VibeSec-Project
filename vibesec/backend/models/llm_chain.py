@@ -53,10 +53,25 @@ def get_ollama_config() -> Tuple[str, str]:
     """Read the canonical Ollama base URL and model at call time."""
     # Environment variables explicitly supplied by the process take precedence;
     # otherwise values loaded from the backend .env file are used.
-    raw_url = os.getenv("OLLAMA_URL") or os.getenv("COLAB_NGROK_URL") or ""
+    # Default to local 127.0.0.1:11434 for zero-config development.
+    raw_url = os.getenv("OLLAMA_URL") or os.getenv("OLLAMA_BASE_URL") or os.getenv("COLAB_NGROK_URL") or "http://127.0.0.1:11434"
     base_url = _normalize_ollama_base_url(raw_url)
     model = (os.getenv("OLLAMA_MODEL") or "qwen2.5-coder:7b").strip()
     return base_url, model
+
+
+def get_ollama_headers() -> dict:
+    """Return headers for Ollama requests, injecting OLLAMA_PROXY_TOKEN if configured."""
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "VibeSec/1.0",
+        "ngrok-skip-browser-warning": "true",
+    }
+    proxy_token = (os.getenv("OLLAMA_PROXY_TOKEN") or "").strip()
+    if proxy_token:
+        headers["Authorization"] = f"Bearer {proxy_token}"
+        headers["X-Ollama-Proxy-Token"] = proxy_token
+    return headers
 
 
 # Backwards-compatible module-level values used by main.py and older imports.
@@ -66,12 +81,8 @@ GROQ_API_KEY = (os.getenv("GROQ_API_KEY") or "").strip()
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
 GEMINI_MODEL = (os.getenv("GEMINI_MODEL") or "gemini-1.5-flash").strip()
 
-NGROK_HEADERS = {
-    "ngrok-skip-browser-warning": "true",
-    "Content-Type": "application/json",
-    "User-Agent": "VibeSec/1.0",
-}
-# Compatibility alias used by main.py's /api/health route.
+NGROK_HEADERS = get_ollama_headers()
+# Dynamic property-like access for OLLAMA_HEADERS
 OLLAMA_HEADERS = NGROK_HEADERS
 
 
@@ -133,6 +144,7 @@ async def _call_ollama(
         pool=8.0,
     )
     start_time = time.perf_counter()
+    headers = get_ollama_headers()
 
     try:
         async with httpx.AsyncClient(
@@ -142,7 +154,7 @@ async def _call_ollama(
             response = await client.post(
                 endpoint,
                 json=payload,
-                headers=NGROK_HEADERS,
+                headers=headers,
             )
     except httpx.TimeoutException as exc:
         elapsed = time.perf_counter() - start_time
@@ -240,6 +252,61 @@ async def _call_ollama(
     return result.strip()
 
 
+async def stream_ollama(
+    prompt: str,
+    base_url: Optional[str] = None,
+    model: Optional[str] = None,
+    task: str = "chat",
+):
+    """Stream token chunks from Ollama generate API."""
+    resolved_base_url, resolved_model = get_ollama_config()
+    target_url = _normalize_ollama_base_url(base_url or resolved_base_url)
+    target_model = (model or resolved_model).strip()
+
+    if not target_url:
+        raise LLMProviderError("OLLAMA_URL is not configured.")
+    if not target_model:
+        raise LLMProviderError("OLLAMA_MODEL is empty.")
+
+    endpoint = f"{target_url}/api/generate"
+    payload = {
+        "model": target_model,
+        "prompt": prompt,
+        "stream": True,
+        "keep_alive": "10m",
+        "options": {
+            "temperature": 0.2,
+            "num_predict": 256 if task in ("chat", "patch_generation") else 512,
+        },
+    }
+    timeout = httpx.Timeout(connect=12.0, read=55.0, write=12.0, pool=8.0)
+    headers = get_ollama_headers()
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            async with client.stream("POST", endpoint, json=payload, headers=headers) as response:
+                if response.status_code != 200:
+                    detail = _response_error_detail(response)
+                    raise LLMProviderError(f"Ollama returned HTTP {response.status_code}: {detail}")
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        chunk_obj = json.loads(line)
+                        token = chunk_obj.get("response", "")
+                        if token:
+                            yield token
+                        if chunk_obj.get("done", False):
+                            break
+                    except json.JSONDecodeError:
+                        continue
+    except httpx.TimeoutException as exc:
+        raise LLMTimeoutError(f"Ollama stream timed out: {type(exc).__name__}") from exc
+    except httpx.RequestError as exc:
+        raise LLMProviderError(f"Could not connect to Ollama ({type(exc).__name__}): {_short_error(exc)}") from exc
+
+
 async def _call_groq(prompt: str, api_key: str, task: str) -> Optional[str]:
     """Optional fallback: call Groq using the SDK already used by this project."""
     try:
@@ -314,8 +381,11 @@ async def _call_gemini(prompt: str, api_key: str, model_name: Optional[str] = No
 async def call_llm(prompt: str, task: str = "analysis") -> Tuple[str, str]:
     """Call AI provider according to environment configuration.
 
-    In production or when AI_PROVIDER=gemini, uses Gemini API first (with Ollama/Groq fallback).
-    In local development, preserves Ollama first (with Groq and Gemini fallbacks).
+    In zero-cost deployment (AI_PROVIDER=ollama, default):
+      Uses Ollama exclusively (local or remote tunnel) with qwen2.5-coder:7b.
+      Automatic Gemini fallback is disabled.
+    When AI_PROVIDER=gemini:
+      Uses Gemini API first if configured.
 
     Returns (response_text, model_identifier).
     """
@@ -325,11 +395,12 @@ async def call_llm(prompt: str, task: str = "analysis") -> Tuple[str, str]:
 
     gemini_key = (os.getenv("GEMINI_API_KEY") or "").strip()
     gemini_model = (os.getenv("GEMINI_MODEL") or "gemini-1.5-flash").strip()
-    ai_provider = (os.getenv("AI_PROVIDER") or "").strip().lower()
-    env_name = (os.getenv("ENVIRONMENT") or os.getenv("NODE_ENV") or "").strip().lower()
+    ai_provider = (os.getenv("AI_PROVIDER") or "ollama").strip().lower()
 
-    # Prioritize Gemini if explicitly configured as primary or running in production with key
-    prefer_gemini = (ai_provider == "gemini") or (env_name == "production" and bool(gemini_key)) or (bool(gemini_key) and not base_url)
+    # Ollama is production AI provider when AI_PROVIDER=ollama (default).
+    # Automatic fallback to Gemini or Groq is disabled when AI_PROVIDER=ollama.
+    prefer_gemini = (ai_provider == "gemini")
+    allow_fallbacks = (ai_provider not in ("ollama", ""))
 
     if prefer_gemini and gemini_key:
         try:
@@ -343,7 +414,7 @@ async def call_llm(prompt: str, task: str = "analysis") -> Tuple[str, str]:
             errors.append(message)
             logger.warning("[%s] Gemini provider failed (%s): %s", task, type(exc).__name__, message)
 
-    # Local development or fallback: Try Ollama
+    # Primary or fallback: Try Ollama
     if base_url:
         try:
             logger.info(
@@ -377,30 +448,30 @@ async def call_llm(prompt: str, task: str = "analysis") -> Tuple[str, str]:
     elif not prefer_gemini:
         errors.append(
             "OLLAMA_URL is not configured. Set it to an Ollama base URL, "
-            "for example http://127.0.0.1:11434 for local inference."
+            "for example http://127.0.0.1:11434 for local inference or your Cloudflare Tunnel URL."
         )
         logger.error("[%s] %s", task, errors[-1])
 
-    # Try Groq fallback
-    groq_key = (os.getenv("GROQ_API_KEY") or "").strip()
-    if groq_key:
-        result = await _call_groq(prompt, groq_key, task)
-        if result:
-            return result, "Groq"
-        errors.append("Groq provider failed.")
+    # Only attempt fallbacks if allowed (disabled when AI_PROVIDER=ollama)
+    if allow_fallbacks:
+        groq_key = (os.getenv("GROQ_API_KEY") or "").strip()
+        if groq_key:
+            result = await _call_groq(prompt, groq_key, task)
+            if result:
+                return result, "Groq"
+            errors.append("Groq provider failed.")
 
-    # Try Gemini if it wasn't tried first
-    if not prefer_gemini and gemini_key:
-        result = await _call_gemini(prompt, gemini_key, gemini_model)
-        if result:
-            return result, f"Gemini ({gemini_model})"
-        errors.append("Gemini provider failed.")
+        if not prefer_gemini and gemini_key:
+            result = await _call_gemini(prompt, gemini_key, gemini_model)
+            if result:
+                return result, f"Gemini ({gemini_model})"
+            errors.append("Gemini provider failed.")
 
     detail = "; ".join(errors) or "No AI providers are configured."
     logger.error("[%s] All configured AI providers failed: %s", task, detail)
 
     if task in ("chat", "patch_generation"):
-        error_type = LLMTimeoutError if ollama_timed_out and not (groq_key or gemini_key) else LLMProviderError
+        error_type = LLMTimeoutError if ollama_timed_out and not (allow_fallbacks and (gemini_key or (os.getenv("GROQ_API_KEY") or "").strip())) else LLMProviderError
         raise error_type(f"All configured AI providers failed. {detail}")
 
     # Explicit offline status for scanner tasks; this is not a clean security verdict.
@@ -417,7 +488,7 @@ async def call_llm(prompt: str, task: str = "analysis") -> Tuple[str, str]:
         "line_hint": 1,
         "confidence": "low",
         "fix": (
-            "Restore the configured Ollama endpoint or configure a working cloud provider, "
+            "Restore the configured Ollama endpoint or tunnel, "
             "then rerun the scan."
         ),
     }

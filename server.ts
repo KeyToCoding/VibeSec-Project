@@ -1260,13 +1260,14 @@ app.get('/api/scan/:scan_id', rateLimit(60), async (req, res) => {
   }
 });
 
-// CHAT ENDPOINT — Proxied securely to FastAPI with internal auth & session tracking
-app.post('/api/chat', rateLimit(40), async (req, res) => {
+// CHAT ENDPOINT — Proxied securely to FastAPI with internal auth, session tracking & streaming support
+app.post(['/api/chat', '/api/chat/stream'], rateLimit(40), async (req, res) => {
   const body = req.body || {};
   if (typeof body.message !== 'string' || !body.message.trim()) {
     return res.status(400).json({ detail: 'Message cannot be empty.' });
   }
 
+  const isStream = Boolean(body.stream || req.path.endsWith('/stream'));
   const sessionId = getSessionIdFromReq(req);
 
   try {
@@ -1274,20 +1275,38 @@ app.post('/api/chat', rateLimit(40), async (req, res) => {
       method: 'POST',
       headers: getInternalHeaders(req, {
         'Content-Type': 'application/json',
-        'Accept': 'application/json',
+        'Accept': isStream ? 'text/event-stream, application/json' : 'application/json',
         ...(sessionId ? { 'X-Session-ID': sessionId } : {}),
       }),
       body: JSON.stringify({
         message: body.message,
         history: Array.isArray(body.history) ? body.history : [],
         context: body.context ?? null,
+        stream: isStream,
       }),
       signal: AbortSignal.timeout(65000),
     });
 
-    const responseBody = await backendRes.text();
+    const contentType = backendRes.headers.get('content-type') || 'application/json';
     res.status(backendRes.status);
-    res.setHeader('Content-Type', backendRes.headers.get('content-type') || 'application/json');
+    res.setHeader('Content-Type', contentType);
+
+    if (contentType.includes('text/event-stream') && backendRes.body) {
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      if (typeof (res as any).flushHeaders === 'function') {
+        (res as any).flushHeaders();
+      }
+      const reader = backendRes.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        res.write(value);
+      }
+      return res.end();
+    }
+
+    const responseBody = await backendRes.text();
     return res.send(responseBody);
   } catch (err: any) {
     const timedOut = err?.name === 'TimeoutError' || err?.name === 'AbortError';

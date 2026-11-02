@@ -13,9 +13,10 @@ import tempfile
 import hmac
 import hashlib
 import secrets
+import json
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, status, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -27,7 +28,8 @@ try:
     from .database import save_scan_result, get_scan_history, get_scan_by_id
     from .models.llm_chain import (
         OLLAMA_URL, OLLAMA_MODEL, COLAB_NGROK_URL, GROQ_API_KEY, GEMINI_API_KEY,
-        call_llm, get_ollama_config, LLMProviderError, LLMTimeoutError, OLLAMA_HEADERS,
+        call_llm, stream_ollama, get_ollama_config, get_ollama_headers,
+        LLMProviderError, LLMTimeoutError, OLLAMA_HEADERS,
     )
     from .remediation import propose_remediation_patch, verify_remediation_patch
 except ImportError:
@@ -38,7 +40,8 @@ except ImportError:
     from database import save_scan_result, get_scan_history, get_scan_by_id
     from models.llm_chain import (
         OLLAMA_URL, OLLAMA_MODEL, COLAB_NGROK_URL, GROQ_API_KEY, GEMINI_API_KEY,
-        call_llm, get_ollama_config, LLMProviderError, LLMTimeoutError, OLLAMA_HEADERS,
+        call_llm, stream_ollama, get_ollama_config, get_ollama_headers,
+        LLMProviderError, LLMTimeoutError, OLLAMA_HEADERS,
     )
     from remediation import propose_remediation_patch, verify_remediation_patch
 
@@ -219,7 +222,7 @@ async def health_check():
             async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0), follow_redirects=True) as client:
                 response = await client.get(
                     f"{active_target}/api/tags",
-                    headers=OLLAMA_HEADERS,
+                    headers=get_ollama_headers(),
                 )
             response.raise_for_status()
             data = response.json()
@@ -447,11 +450,12 @@ class ChatRequest(BaseModel):
     message: str
     history: List[Dict[str, Any]] = Field(default_factory=list)
     context: Optional[Dict[str, Any]] = None
+    stream: Optional[bool] = False
 
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
-    """Answer a security question via the shared LLM chain."""
+    """Answer a security question via the shared LLM chain (supports streaming)."""
     message = (req.message or "").strip()
     if not message:
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
@@ -493,6 +497,27 @@ Recent conversation:
 User: {message[:2000]}
 Assistant:"""
 
+    # Handle streaming request
+    if req.stream:
+        async def event_generator():
+            try:
+                async for chunk in stream_ollama(prompt, task="chat"):
+                    yield f"data: {json.dumps({'chunk': chunk, 'done': False})}\n\n"
+                yield f"data: {json.dumps({'chunk': '', 'done': True})}\n\n"
+                yield "data: [DONE]\n\n"
+            except (LLMTimeoutError, asyncio.TimeoutError) as exc:
+                logger.warning("Streaming chat timed out: %s", exc)
+                yield f"data: {json.dumps({'error': 'AI response timed out. Ensure the Ollama tunnel is running.', 'done': True})}\n\n"
+            except Exception as exc:
+                logger.warning("Streaming chat error: %s", exc)
+                yield f"data: {json.dumps({'error': str(exc), 'done': True})}\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
+
     try:
         # Leave margin for Express (65 s) and browser (70 s) deadlines.
         answer, model_used = await asyncio.wait_for(
@@ -532,6 +557,13 @@ Assistant:"""
         "reply": answer.strip(),
         "model": model_used,
     }
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(req: ChatRequest):
+    """Explicit streaming chat endpoint via Server-Sent Events (SSE)."""
+    req.stream = True
+    return await chat(req)
 
 
 @app.get("/api/scan/{scan_id}")
