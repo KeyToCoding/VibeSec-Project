@@ -1,0 +1,247 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "VibeSec: 1 - Ollama",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\scripts\\Run-Antigravity-Ollama.ps1"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "problemMatcher": [
+        {
+          "owner": "vibesec-ollama-ready",
+          "pattern": {
+            "regexp": "^\\[READY\\] (Ollama is responding.*)$",
+            "message": 1
+          },
+          "background": {
+            "activeOnStart": true,
+            "beginsPattern": "^\\[START\\]",
+            "endsPattern": "^\\[READY\\] Ollama is responding"
+          }
+        }
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": false,
+        "echo": false,
+        "showReuseMessage": false,
+        "clear": false
+      }
+    },
+    {
+      "label": "VibeSec: 2 - Authenticated Proxy",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\scripts\\Run-Antigravity-Proxy.ps1"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "problemMatcher": [
+        {
+          "owner": "vibesec-proxy-ready",
+          "pattern": {
+            "regexp": "^(?:\\[READY\\] (.*)|.*(Listening on:\\s+http://127\\.0\\.0\\.1:11435).*)$",
+            "message": 1
+          },
+          "background": {
+            "activeOnStart": true,
+            "beginsPattern": "^\\[START\\]",
+            "endsPattern": "^(\\[READY\\] Authenticated Ollama proxy is already running|.*Listening on:\\s+http://127\\.0\\.0\\.1:11435).*$"
+          }
+        }
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": false,
+        "echo": false,
+        "showReuseMessage": false,
+        "clear": false
+      }
+    },
+    {
+      "label": "VibeSec: 3 - Cloudflare Tunnel",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\scripts\\Run-Antigravity-Tunnel.ps1"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "problemMatcher": [
+        {
+          "owner": "vibesec-tunnel-ready",
+          "pattern": {
+            "regexp": "^\\[READY\\] (Cloudflare tunnel URL: https://.*)$",
+            "message": 1
+          },
+          "background": {
+            "activeOnStart": true,
+            "beginsPattern": "^\\[START\\]",
+            "endsPattern": "^\\[READY\\] Cloudflare tunnel URL: https://"
+          }
+        }
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": false,
+        "echo": false,
+        "showReuseMessage": false,
+        "clear": false
+      }
+    },
+    {
+      "label": "VibeSec: 4 - Connection Details (URL + Token)",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\scripts\\Show-Antigravity-Connection.ps1"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "problemMatcher": [
+        {
+          "owner": "vibesec-connection-ready",
+          "pattern": {
+            "regexp": "^\\[READY\\] (Connection details are displayed.*)$",
+            "message": 1
+          },
+          "background": {
+            "activeOnStart": true,
+            "beginsPattern": "^\\[START\\]",
+            "endsPattern": "^\\[READY\\] Connection details are displayed"
+          }
+        }
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": false,
+        "echo": false,
+        "showReuseMessage": false,
+        "clear": false
+      }
+    },
+    {
+      "label": "VibeSec: 5 - App + Logs",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\scripts\\Run-Antigravity-App.ps1"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "problemMatcher": [
+        {
+          "owner": "vibesec-app-ready",
+          "pattern": {
+            "regexp": "^\\[READY\\] (VibeSec app is available.*)$",
+            "message": 1
+          },
+          "background": {
+            "activeOnStart": true,
+            "beginsPattern": "^\\[START\\]",
+            "endsPattern": "^\\[READY\\] VibeSec app is available"
+          }
+        }
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": false,
+        "echo": false,
+        "showReuseMessage": false,
+        "clear": false
+      }
+    },
+    {
+      "label": "VibeSec: Start All (Antigravity Integrated)",
+      "dependsOn": [
+        "VibeSec: 1 - Ollama",
+        "VibeSec: 2 - Authenticated Proxy",
+        "VibeSec: 3 - Cloudflare Tunnel",
+        "VibeSec: 4 - Connection Details (URL + Token)",
+        "VibeSec: 5 - App + Logs"
+      ],
+      "dependsOrder": "parallel",
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "focus": false,
+        "echo": false,
+        "showReuseMessage": false
+      }
+    },
+    {
+      "label": "VibeSec: Stop Local App Services",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\scripts\\Stop-VibeSec.ps1"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true,
+        "echo": true,
+        "showReuseMessage": false
+      }
+    }
+  ]
+}

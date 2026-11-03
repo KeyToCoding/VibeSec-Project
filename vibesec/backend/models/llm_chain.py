@@ -144,7 +144,7 @@ async def _call_ollama(
     endpoint = f"{base_url}/api/generate"
     token_limits = {
         # Concise interactive answers are faster on CPU-hosted local inference.
-        "chat": 96,
+        "chat": 256,
         # Leave enough room for the complete required JSON object.
         "chunk_analysis": 220,
         "patch_generation": 220,
