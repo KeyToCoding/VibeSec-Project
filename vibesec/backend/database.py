@@ -15,30 +15,42 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger("vibesec.db")
 
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017/vibesec")
+MONGODB_URI = (os.getenv("MONGODB_URI") or "").strip()
 
 # In-memory storage cache if MongoDB is offline
 _IN_MEMORY_SCANS: Dict[str, Dict[str, Any]] = {}
 _mongo_client = None
 _db = None
 _scans_collection = None
+_mongo_unavailable = False
 
 
 def get_db():
-    global _mongo_client, _db, _scans_collection
+    global _mongo_client, _db, _scans_collection, _mongo_unavailable
     if _db is not None:
         return _scans_collection
+    if _mongo_unavailable:
+        return None
+    if not MONGODB_URI:
+        _mongo_unavailable = True
+        logger.warning(
+            "MONGODB_URI is not configured; using in-memory scan history. "
+            "Server-side history will not persist across service restarts."
+        )
+        return None
     try:
         from pymongo import MongoClient
         _mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=2000)
-        # Test connection
         _mongo_client.server_info()
         _db = _mongo_client.get_database()
         _scans_collection = _db["scans"]
-        logger.info(f"Connected to MongoDB at {MONGODB_URI}")
+        logger.info("Connected to configured MongoDB database.")
         return _scans_collection
     except Exception as e:
-        logger.warning(f"MongoDB connection failed ({e}). Using in-memory database store.")
+        logger.warning(
+            "MongoDB connection failed (%s). Using in-memory database store.",
+            type(e).__name__,
+        )
         return None
 
 

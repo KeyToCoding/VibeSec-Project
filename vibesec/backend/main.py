@@ -524,13 +524,13 @@ Assistant:"""
         )
 
     try:
-        # Calibrated 65s deadline for local Ollama CPU inference
+        # Leave margin above Ollama's 75s read timeout for queueing and serialization.
         answer, model_used = await asyncio.wait_for(
             call_llm(prompt, task="chat"),
-            timeout=65.0,
+            timeout=90.0,
         )
     except asyncio.TimeoutError as exc:
-        logger.warning("Chat inference exceeded the 65-second application deadline")
+        logger.warning("Chat inference exceeded the 90-second application deadline")
         raise HTTPException(
             status_code=504,
             detail="AI response timed out. Check that the configured Ollama service is running, then retry with a shorter question.",

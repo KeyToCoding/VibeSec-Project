@@ -119,6 +119,29 @@ class TestOllamaInference(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(model_used, "Ollama (qwen2.5-coder:7b)")
 
     @patch("httpx.AsyncClient.post")
+    async def test_chunk_analysis_uses_structured_json_schema(self, mock_post):
+        """Chunk verification must request schema-constrained JSON from Ollama."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"content-type": "application/json"}
+        mock_resp.json.return_value = {"response": '{"is_vulnerable": false}'}
+        mock_post.return_value = mock_resp
+
+        env = {
+            "AI_PROVIDER": "ollama",
+            "OLLAMA_URL": "http://127.0.0.1:11434",
+            "OLLAMA_MODEL": "qwen2.5-coder:7b",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            await call_llm("Return a compact vulnerability assessment.", task="chunk_analysis")
+            payload = mock_post.call_args.kwargs["json"]
+            schema = payload["format"]
+            self.assertIsInstance(schema, dict)
+            self.assertEqual(schema.get("type"), "object")
+            self.assertIn("is_vulnerable", schema.get("required", []))
+            self.assertEqual(payload["options"]["num_predict"], 220)
+
+    @patch("httpx.AsyncClient.post")
     async def test_no_gemini_fallback_when_ai_provider_is_ollama(self, mock_post):
         """When AI_PROVIDER=ollama, failure should not fall back to Gemini even if key exists."""
         mock_post.side_effect = httpx.ConnectError("Connection refused to Ollama")

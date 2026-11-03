@@ -22,23 +22,56 @@ except ImportError:
 logger = logging.getLogger("vibesec.vuln_agent")
 
 # MD5 cache: chunk_hash -> analyzed_dict
-_CHUNK_CACHE: Dict[str, Dict[str, Any]] = {}
+_CHUNK_CACHE: Dict[str, Optional[Dict[str, Any]]] = {}
 
 
 def _clean_json_str(raw: str) -> str:
-    """Extract json object from potential markdown codeblocks."""
-    raw = raw.strip()
+    """Extract the first complete JSON object, allowing harmless surrounding text."""
+    raw = (raw or "").strip()
     if raw.startswith("```"):
-        # Remove opening ```json or ```
         lines = raw.splitlines()
         if len(lines) > 2 and lines[-1].strip() == "```":
             raw = "\n".join(lines[1:-1]).strip()
-    # Find outer curly braces
+
     start = raw.find("{")
-    end = raw.rfind("}")
-    if start != -1 and end != -1:
-        return raw[start:end+1]
-    return raw
+    if start < 0:
+        return raw
+
+    # Decode only the first complete object; do not include trailing commentary.
+    decoder = json.JSONDecoder()
+    try:
+        _value, end = decoder.raw_decode(raw[start:])
+        return raw[start:start + end]
+    except json.JSONDecodeError:
+        return raw[start:]
+
+
+def _static_fallback_result(
+    finding: Dict[str, Any],
+    snippet: str,
+    rule_msg: str,
+    rule_id: str,
+    line_start: int,
+    filename: str,
+) -> Dict[str, Any]:
+    """Preserve the deterministic static finding when AI verification fails."""
+    severity = str(finding.get("severity", "medium")).lower()
+    if severity not in {"critical", "high", "medium", "low"}:
+        severity = "medium"
+    return {
+        "title": rule_id or "Potential Vulnerability",
+        "severity": severity,
+        "owasp": "A03:2021-Injection",
+        "description": rule_msg or "Static analysis detected a security pattern requiring review.",
+        "attack_scenario": "An attacker may exploit the flagged input or unsafe operation if it is reachable.",
+        "line_hint": line_start,
+        "confidence": "medium",
+        "fix": "Review the flagged operation and use a context-appropriate safe API or parameterized input.",
+        "code_snippet": snippet,
+        "file": filename,
+        "model_used": "Static analysis (AI verification unavailable)",
+        "rule_id": rule_id,
+    }
 
 
 async def analyze_chunk(
@@ -80,15 +113,26 @@ async def analyze_chunk(
         raw_output, model_used = await call_llm(prompt, task="chunk_analysis")
         clean_json = _clean_json_str(raw_output)
         data = json.loads(clean_json)
+        if not isinstance(data, dict):
+            raise ValueError("AI response was not a JSON object.")
+        if not isinstance(data.get("is_vulnerable"), bool):
+            raise ValueError("AI response is missing a boolean is_vulnerable field.")
 
-        is_vulnerable = bool(data.get("is_vulnerable", False))
+        is_vulnerable = data["is_vulnerable"]
         confidence = str(data.get("confidence", "medium")).lower()
+        if confidence not in {"high", "medium", "low"}:
+            confidence = "medium"
 
         # Filter: only accept if is_vulnerable is True and confidence != 'low'
         if is_vulnerable and confidence != "low":
             parsed_result = {
                 "title": data.get("title", finding.get("rule_id", "Security Vulnerability")),
-                "severity": data.get("severity", finding.get("severity", "medium")).lower(),
+                "severity": (
+                    str(data.get("severity", finding.get("severity", "medium"))).lower()
+                    if str(data.get("severity", finding.get("severity", "medium"))).lower()
+                    in {"critical", "high", "medium", "low"}
+                    else str(finding.get("severity", "medium")).lower()
+                ),
                 "owasp": data.get("owasp", "A03:2021-Injection"),
                 "description": data.get("description", rule_msg),
                 "attack_scenario": data.get("attack_scenario", "Attacker can exploit input vector to manipulate execution."),
@@ -107,20 +151,21 @@ async def analyze_chunk(
             _CHUNK_CACHE[cache_key] = None
             return None
 
+    except json.JSONDecodeError as e:
+        logger.warning(
+            "AI returned malformed JSON for rule %s (%s); preserving the static finding.",
+            rule_id,
+            e.msg,
+        )
+        fallback = _static_fallback_result(finding, snippet, rule_msg, rule_id, line_start, filename)
+        _CHUNK_CACHE[cache_key] = fallback
+        return fallback
     except Exception as e:
-        logger.error(f"Failed to analyze chunk via LLM: {e}")
-        # Keep finding from static analysis if LLM fails
-        return {
-            "title": finding.get("rule_id", "Potential Vulnerability"),
-            "severity": finding.get("severity", "medium").lower(),
-            "owasp": "A03:2021-Injection",
-            "description": finding.get("message", "Static analysis detected security violation."),
-            "attack_scenario": "Attacker may leverage unverified inputs or unsafe patterns.",
-            "line_hint": line_start,
-            "confidence": "medium",
-            "fix": "Refactor code to avoid direct string interpolation and validate parameters.",
-            "code_snippet": snippet,
-            "file": filename,
-            "model_used": "Semgrep Static Heuristics",
-            "rule_id": rule_id
-        }
+        logger.warning(
+            "AI verification failed for rule %s (%s); preserving the static finding.",
+            rule_id,
+            type(e).__name__,
+        )
+        fallback = _static_fallback_result(finding, snippet, rule_msg, rule_id, line_start, filename)
+        _CHUNK_CACHE[cache_key] = fallback
+        return fallback

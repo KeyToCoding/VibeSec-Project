@@ -26,6 +26,27 @@ class LLMProviderError(RuntimeError):
 class LLMTimeoutError(LLMProviderError):
     """Raised when an upstream inference request times out."""
 
+
+VULN_ANALYSIS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_vulnerable": {"type": "boolean"},
+        "title": {"type": "string"},
+        "severity": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
+        "owasp": {"type": "string"},
+        "description": {"type": "string"},
+        "attack_scenario": {"type": "string"},
+        "line_hint": {"type": "integer"},
+        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+        "fix": {"type": "string"},
+    },
+    "required": [
+        "is_vulnerable", "title", "severity", "owasp", "description",
+        "attack_scenario", "line_hint", "confidence", "fix",
+    ],
+    "additionalProperties": False,
+}
+
 # Resolve .env relative to this file, not the process working directory.
 ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(dotenv_path=ENV_PATH, override=False)
@@ -121,23 +142,32 @@ async def _call_ollama(
         raise RuntimeError("OLLAMA_MODEL is empty.")
 
     endpoint = f"{base_url}/api/generate"
+    token_limits = {
+        # Concise interactive answers are faster on CPU-hosted local inference.
+        "chat": 96,
+        # Leave enough room for the complete required JSON object.
+        "chunk_analysis": 220,
+        "patch_generation": 220,
+    }
     payload = {
         "model": model,
         "prompt": prompt,
         "stream": False,
         "keep_alive": "10m",
         "options": {
-            "temperature": 0.2,
-            "num_predict": 140 if task == "chat" else (220 if task == "patch_generation" else 180),
+            "temperature": 0.1 if task == "chunk_analysis" else 0.2,
+            "num_predict": token_limits.get(task, 160),
         },
     }
 
-    # Scanner analysis expects structured JSON; ordinary chatbot answers do not.
-    if task != "chat":
+    # Constrain vulnerability analysis to the exact schema expected by vuln_agent.
+    if task == "chunk_analysis":
+        payload["format"] = VULN_ANALYSIS_SCHEMA
+    elif task != "chat":
         payload["format"] = "json"
 
-    # Calibrated timeouts: 85s for patch generation, 60s for chat/analysis
-    read_timeout = 85.0 if task == "patch_generation" else 60.0
+    # Leave margin for CPU inference while outer FastAPI/Express deadlines remain longer.
+    read_timeout = 85.0 if task in ("patch_generation", "chunk_analysis") else 75.0
     timeout = httpx.Timeout(
         connect=12.0,
         read=read_timeout,
@@ -280,7 +310,7 @@ async def stream_ollama(
             "num_predict": 256 if task in ("chat", "patch_generation") else 512,
         },
     }
-    timeout = httpx.Timeout(connect=12.0, read=55.0, write=12.0, pool=8.0)
+    timeout = httpx.Timeout(connect=12.0, read=85.0, write=12.0, pool=8.0)
     headers = get_ollama_headers()
 
     try:

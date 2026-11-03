@@ -10,6 +10,8 @@ Author: Kartikey Vishwakarma (NIELIT Gorakhpur Major Project)
 """
 
 import unittest
+import json
+import time
 import asyncio
 from scanner.hallucination import extract_imports, check_packages
 from scanner.semgrep_runner import semgrep_scan, detect_ast_sqli, native_fallback_scan
@@ -17,6 +19,8 @@ from scanner.env_detector import is_aws_example_credential, inspect_env_file_con
 from remediation import apply_snippet_patch_to_code, generate_unified_diff
 from scanner.code_scanner import scan_code
 from models.llm_chain import LLMTimeoutError, LLMProviderError
+from scanner.vuln_agent import analyze_chunk
+from unittest.mock import AsyncMock, patch
 from main import generate_session_token, verify_session_credentials
 
 
@@ -165,6 +169,100 @@ class TestDefectResolutions(unittest.TestCase):
         self.assertEqual(js_result.get("language"), "javascript")
         for finding in js_result.get("vulnerabilities", []):
             self.assertEqual(finding.get("language"), "javascript")
+
+    def test_semgrep_does_not_block_fastapi_event_loop(self):
+        """A slow Semgrep CLI must run off-thread so other async requests can progress."""
+        def slow_semgrep(code, language):
+            time.sleep(0.15)
+            return []
+
+        async def run_check():
+            scan_task = asyncio.create_task(scan_code("print('safe')", language="python"))
+            start = time.perf_counter()
+            await asyncio.sleep(0.02)
+            heartbeat_elapsed = time.perf_counter() - start
+            self.assertLess(
+                heartbeat_elapsed,
+                0.10,
+                "A blocking Semgrep subprocess stalled the event loop.",
+            )
+            await scan_task
+
+        with patch("scanner.code_scanner.semgrep_scan", side_effect=slow_semgrep):
+            with patch("scanner.code_scanner.check_packages", new=AsyncMock(return_value=[])):
+                asyncio.run(run_check())
+
+    def test_valid_structured_ai_json_is_parsed(self):
+        """A schema-valid model response is mapped into the scanner's finding format."""
+        finding = {
+            "rule_id": "python.lang.security.audit.sqli",
+            "severity": "HIGH",
+            "message": "Dynamic SQL query uses untrusted input.",
+            "line_start": 7,
+            "code_snippet": "query = f'SELECT * FROM users WHERE id={account_id}'",
+        }
+        response = {
+            "is_vulnerable": True,
+            "title": "SQL injection",
+            "severity": "high",
+            "owasp": "A03:2021-Injection",
+            "description": "User input is interpolated into SQL.",
+            "attack_scenario": "An attacker changes the query predicate.",
+            "line_hint": 7,
+            "confidence": "high",
+            "fix": "Use a parameterized query.",
+        }
+
+        async def run_check():
+            with patch(
+                "scanner.vuln_agent.call_llm",
+                new=AsyncMock(return_value=(
+                    json.dumps(response),
+                    "Ollama (qwen2.5-coder:7b)",
+                )),
+            ):
+                result = await analyze_chunk(
+                    finding,
+                    finding["code_snippet"],
+                    "python",
+                    "app.py",
+                )
+                self.assertIsNotNone(result)
+                self.assertEqual(result["title"], "SQL injection")
+                self.assertEqual(result["severity"], "high")
+                self.assertEqual(result["model_used"], "Ollama (qwen2.5-coder:7b)")
+
+        asyncio.run(run_check())
+
+    def test_malformed_ai_json_preserves_static_finding(self):
+        """Malformed/truncated model JSON must not erase a deterministic static finding."""
+        finding = {
+            "rule_id": "python.lang.security.audit.sqli",
+            "severity": "HIGH",
+            "message": "Dynamic SQL query uses untrusted input.",
+            "line_start": 7,
+            "code_snippet": "query = f'SELECT * FROM users WHERE id={user_id}'",
+        }
+
+        async def run_check():
+            with patch(
+                "scanner.vuln_agent.call_llm",
+                new=AsyncMock(return_value=(
+                    '{"is_vulnerable": true, "description": "truncated string',
+                    "Ollama (qwen2.5-coder:7b)",
+                )),
+            ):
+                result = await analyze_chunk(
+                    finding,
+                    finding["code_snippet"],
+                    "python",
+                    "app.py",
+                )
+                self.assertIsNotNone(result)
+                self.assertEqual(result["model_used"], "Static analysis (AI verification unavailable)")
+                self.assertEqual(result["rule_id"], finding["rule_id"])
+
+        asyncio.run(run_check())
 
     def test_timeout_calibration_and_slow_mock(self):
         """Test upstream/downstream timeout hierarchy and slow mock timeout handling."""

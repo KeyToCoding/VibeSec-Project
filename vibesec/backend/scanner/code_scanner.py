@@ -47,8 +47,10 @@ async def scan_code(
     start_time = time.time()
     logger.info(f"Initiating code scan for {filename} ({language}, {len(code)} bytes)")
 
-    # Step 1: Run static analysis / semgrep
-    semgrep_findings = semgrep_scan(code, language)
+    # Step 1: Run Semgrep outside the event loop. The CLI can take up to 30s
+    # (for example while resolving remote rules); blocking here prevents unrelated
+    # FastAPI requests such as /api/chat from progressing and firing their deadlines.
+    semgrep_findings = await asyncio.to_thread(semgrep_scan, code, language)
     logger.info(f"Semgrep returned {len(semgrep_findings)} candidate findings")
 
     # Step 2: Concurrently analyze findings with VulnAgent and check hallucinated packages

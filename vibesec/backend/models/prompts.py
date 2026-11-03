@@ -10,17 +10,20 @@ Language: {language}
 Context: {context}
 Semgrep finding: {semgrep_finding}
 
-Respond ONLY in this exact JSON:
+Return one compact JSON object only. Do not use Markdown or code fences.
+Keep title short. Keep description, attack_scenario, and fix to one concise sentence
+(each no more than 20 words). Use the supplied line number as an integer.
+Do not include fields beyond this exact structure:
 {{
   "is_vulnerable": true,
   "title": "short vulnerability name",
   "severity": "critical",
-  "owasp": "OWASP category e.g. A03:2021",
-  "description": "what the vulnerability is",
-  "attack_scenario": "how an attacker would exploit this",
+  "owasp": "A03:2021-Injection",
+  "description": "short explanation",
+  "attack_scenario": "short realistic exploit scenario",
   "line_hint": 1,
   "confidence": "high",
-  "fix": "exact fixed code or clear instruction"
+  "fix": "specific secure remediation"
 }}
 """
 

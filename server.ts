@@ -507,7 +507,8 @@ app.post('/api/scan/code', rateLimit(60), async (req, res) => {
         'Accept': 'application/json',
       }),
       body: JSON.stringify({ code, language, filename }),
-      signal: AbortSignal.timeout(60000),
+      // Allow Semgrep startup plus bounded local-model verification and report assembly.
+      signal: AbortSignal.timeout(150000),
     });
 
     const forwardSid = backendRes.headers.get('x-session-id');
@@ -1487,7 +1488,8 @@ app.post(['/api/chat', '/api/chat/stream'], rateLimit(40), async (req, res) => {
         context: body.context ?? null,
         stream: isStream,
       }),
-      signal: AbortSignal.timeout(70000),
+      // Must exceed FastAPI's 90s chat deadline to avoid cancelling valid CPU inference.
+      signal: AbortSignal.timeout(100000),
     });
 
     const contentType = backendRes.headers.get('content-type') || 'application/json';

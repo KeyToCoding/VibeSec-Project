@@ -167,7 +167,7 @@ export const SecurityBot: React.FC<SecurityBotProps> = ({
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
-    const timeoutId = setTimeout(() => controller.abort(), 75000);
+    const timeoutId = setTimeout(() => controller.abort(), 110000);
 
     try {
       const response = await fetch(getApiUrl("/api/chat"), {
