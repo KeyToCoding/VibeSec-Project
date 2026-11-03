@@ -75,13 +75,37 @@ html.dark {
   100% { background-position: -200% 0; }
 }
 
-/* Feature 8: Print styles */
+/* Feature 8: Print styles for clean PDF export */
 @media print {
-  .sidebar, .topbar, .scan-input, .chat-bot, nav, header { display: none !important; }
-  body { background: white !important; color: black !important; }
-  body::after { display: none !important; }
-  .print-header { display: block !important; }
-  .vuln-card { break-inside: avoid; border: 1px solid #ccc !important; margin: 8px 0 !important; background: #fff !important; color: #000 !important; }
+  aside, nav, header, button, .sidebar, .topbar, .scan-input, .chat-bot, [role="dialog"], .fixed {
+    display: none !important;
+  }
+  body, html, main {
+    background: #ffffff !important;
+    color: #111827 !important;
+    overflow: visible !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+  .print-header {
+    display: block !important;
+    margin-bottom: 1.5rem !important;
+  }
+  .print-header * {
+    color: #111827 !important;
+  }
+  .vuln-card, [class*="rounded-xl"], [class*="rounded-2xl"] {
+    break-inside: avoid;
+    page-break-inside: avoid;
+    box-shadow: none !important;
+    border: 1px solid #e5e7eb !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+  }
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
 }
 
 /* Custom terminal scrollbars */

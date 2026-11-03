@@ -33,6 +33,30 @@ const CVE_MAP: Record<string, string> = {
   "Insecure Deserialization": "CVE-2022-22965",
 };
 
+export const resolveLanguage = (vuln?: Vulnerability | null, reportLang?: string): string => {
+  if (vuln?.language) return vuln.language;
+  const fileName = vuln?.file || "";
+  const ext = fileName.includes(".") ? fileName.slice(fileName.lastIndexOf(".")).toLowerCase() : "";
+  const extMap: Record<string, string> = {
+    ".py": "python",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".php": "php",
+    ".java": "java",
+    ".go": "go",
+    ".rb": "ruby",
+    ".env": "dotenv",
+    ".json": "json",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+  };
+  if (ext && extMap[ext]) return extMap[ext];
+  if (reportLang && reportLang !== "multi") return reportLang;
+  return "python";
+};
+
 // Helper to look up CVE by title or OWASP
 function getCveForVuln(vuln: Vulnerability): string {
   if (vuln.rule_id && CVE_MAP[vuln.rule_id]) return CVE_MAP[vuln.rule_id];
@@ -87,6 +111,17 @@ export const VulnReport: React.FC<VulnReportProps> = ({
   // PDF Export using window.print()
   const handlePrint = () => {
     window.print();
+  };
+
+  // JSON Export as downloadable blob
+  const handleExportJson = () => {
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(report, null, 2));
+    const downloadAnchor = document.createElement("a");
+    downloadAnchor.setAttribute("href", dataStr);
+    downloadAnchor.setAttribute("download", `vibesec-report-${report.scan_id || Date.now()}.json`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
   };
 
   const counts = report.severity_counts || { critical: 0, high: 0, medium: 0, low: 0, safe: 0 };
@@ -163,6 +198,15 @@ export const VulnReport: React.FC<VulnReportProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
+          {/* JSON Export Button */}
+          <button
+            type="button"
+            onClick={handleExportJson}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[var(--card-bg)] hover:bg-[var(--bg-main)] text-[var(--text-primary)] border border-[var(--card-border)] text-xs font-semibold cursor-pointer shadow-sm transition-colors"
+          >
+            <span>📥</span>
+            <span>Export JSON</span>
+          </button>
           {/* FEATURE 8: PDF Export Button */}
           <button
             type="button"
@@ -338,6 +382,10 @@ export const VulnReport: React.FC<VulnReportProps> = ({
                               line {vuln.line_hint}
                             </span>
                           )}
+
+                          <span className="text-[10px] font-mono uppercase bg-[var(--bg-main)] text-[var(--text-secondary)] px-2 py-0.5 rounded border border-[var(--card-border)]">
+                            {resolveLanguage(vuln, report.language)}
+                          </span>
                         </div>
 
                         {/* Short description */}
@@ -608,7 +656,7 @@ export const VulnReport: React.FC<VulnReportProps> = ({
         }}
         vulnerability={selectedVulnForRemediate}
         codeContext={currentCodeContext || selectedVulnForRemediate?.code_snippet || ""}
-        language={report.language || "python"}
+        language={resolveLanguage(selectedVulnForRemediate, report.language)}
         filename={report.filename || selectedVulnForRemediate?.file || "snippet"}
         onApplyFixToEditor={onApplyFixToEditor}
       />

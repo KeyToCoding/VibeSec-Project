@@ -178,6 +178,16 @@ async def scan_upload(
                 except OSError:
                     pass
 
+            # Discover local repository modules for package hallucination exclusion
+            local_modules: Set[str] = set()
+            for root, dirs, files in os.walk(temp_dir):
+                dirs[:] = [d for d in dirs if not should_skip_path(d)]
+                for d in dirs:
+                    local_modules.add(d.lower())
+                for f in files:
+                    if f.lower().endswith(".py"):
+                        local_modules.add(os.path.splitext(f.lower())[0])
+
             # Walk extracted files
             for root, dirs, files in os.walk(temp_dir):
                 # Prune skipped directories in-place
@@ -230,7 +240,7 @@ async def scan_upload(
                         code_content = src_f.read(60000)
 
                     # Scan code chunk
-                    file_res = await scan_code(code_content, language=lang, filename=rel_p)
+                    file_res = await scan_code(code_content, language=lang, filename=rel_p, local_modules=local_modules)
                     all_vulnerabilities.extend(file_res.get("vulnerabilities", []))
                     all_hallucinations.extend(file_res.get("hallucinated_packages", []))
 

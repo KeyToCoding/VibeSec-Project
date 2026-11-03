@@ -1,4 +1,4 @@
-﻿"""
+"""
 VibeSec Package Hallucination & Supply Chain Attack Checker
 Extracts imported packages from AI-generated code and verifies existence
 against public package registries (npm registry & PyPI).
@@ -6,11 +6,12 @@ Detects 'slopsquatting' and package hallucinations that attackers exploit to inj
 Author: Kartikey Vishwakarma (NIELIT Gorakhpur Major Project)
 """
 
+import ast
 import re
 import asyncio
 import httpx
 import logging
-from typing import List, Dict, Any, Set
+from typing import List, Dict, Any, Set, Optional
 try:
     from models.llm_chain import call_llm
     from models.prompts import HALLUCINATION_PROMPT, PYPI_HALLUCINATION_PROMPT
@@ -38,7 +39,8 @@ PYTHON_STDLIB: Set[str] = {
     "itertools", "json", "logging", "math", "multiprocessing", "os", "pathlib",
     "pickle", "platform", "queue", "random", "re", "shutil", "signal", "socket",
     "sqlite3", "ssl", "string", "subprocess", "sys", "tempfile", "threading",
-    "time", "traceback", "typing", "unittest", "urllib", "uuid", "warnings", "zipfile"
+    "time", "traceback", "typing", "unittest", "urllib", "uuid", "warnings", "zipfile",
+    "email", "secrets", "dataclasses", "ipaddress", "mimetypes", "difflib", "inspect"
 }
 
 
@@ -57,16 +59,17 @@ def clean_package_name(pkg: str) -> str:
     return pkg.split("/")[0]
 
 
-def extract_imports(code: str, language: str) -> List[str]:
-    """Extract all third-party package names from source code."""
+def extract_imports(code: str, language: str, local_modules: Optional[Set[str]] = None) -> List[str]:
+    """Extract all third-party package names from source code, excluding stdlib and local modules."""
     packages: Set[str] = set()
     lang_lower = language.lower()
+    local_set = {m.lower() for m in (local_modules or set())}
 
     if lang_lower in ("javascript", "typescript", "js", "ts", "jsx", "tsx"):
         # Match ES6 imports: import x from 'pkg', import { a } from "pkg", import "pkg"
-        es_imports = re.findall(r'''(?:import\s+(?:[\w\s{},*]+from\s+)?|import\s*\(\s*)['"]([^'"\n]+)['"]''', code)
+        es_imports = re.findall(r'''(?:import[ \t]+(?:[\w\s{},*]+from[ \t]+)?|import\s*\(\s*)['"]([^'"\r\n]+)['"]''', code)
         # Match CommonJS require: require('pkg')
-        cjs_imports = re.findall(r'''require\s*\(\s*['"]([^'"\n]+)['"]\s*\)''', code)
+        cjs_imports = re.findall(r'''require\s*\(\s*['"]([^'"\r\n]+)['"]\s*\)''', code)
 
         for imp in es_imports + cjs_imports:
             imp = imp.strip()
@@ -81,35 +84,64 @@ def extract_imports(code: str, language: str) -> List[str]:
             if normalized.startswith("@types/"):
                 continue
             cleaned = clean_package_name(normalized)
-            if cleaned:
+            if cleaned and cleaned.lower() not in local_set:
                 packages.add(cleaned)
 
     elif lang_lower in ("python", "py"):
-        # Match: import pkg, import pkg.sub, import pkg as x
-        py_imports = re.findall(r'''^\s*(?:import)\s+([\w\s,]+)''', code, re.MULTILINE)
-        for group in py_imports:
-            for item in group.split(","):
-                item = item.strip().split(" as ")[0].strip()
-                root_pkg = item.split(".")[0]
-                if root_pkg and root_pkg not in PYTHON_STDLIB:
-                    packages.add(root_pkg)
+        ast_success = False
+        try:
+            tree = ast.parse(code)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        root_pkg = alias.name.split(".")[0].strip()
+                        if root_pkg and root_pkg not in PYTHON_STDLIB and root_pkg.lower() not in local_set:
+                            packages.add(root_pkg)
+                elif isinstance(node, ast.ImportFrom):
+                    # level == 0 means absolute import; level > 0 is relative (. or ..)
+                    if getattr(node, "level", 0) == 0 and node.module:
+                        root_pkg = node.module.split(".")[0].strip()
+                        if root_pkg and root_pkg not in PYTHON_STDLIB and root_pkg.lower() not in local_set:
+                            packages.add(root_pkg)
+            ast_success = True
+        except Exception:
+            ast_success = False
 
-        # Match: from pkg import ...
-        py_from = re.findall(r'''^\s*from\s+([.\w]+)\s+import''', code, re.MULTILINE)
-        for item in py_from:
-            item = item.strip()
-            if item.startswith("."):
-                continue
-            root_pkg = item.split(".")[0]
-            if root_pkg and root_pkg not in PYTHON_STDLIB:
-                packages.add(root_pkg)
+        if not ast_success:
+            # Safe line-by-line regex fallback with strict horizontal whitespace only (no cross-line match)
+            for raw_line in code.splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
 
-    return list(packages)
+                # Match: import pkg, pkg2 as x
+                m_import = re.match(r'^[ \t]*import[ \t]+([a-zA-Z0-9_., \t]+)$', line)
+                if m_import:
+                    for item in m_import.group(1).split(","):
+                        item = item.strip().split(" as ")[0].strip()
+                        root_pkg = item.split(".")[0].strip()
+                        if root_pkg and root_pkg not in PYTHON_STDLIB and root_pkg.lower() not in local_set:
+                            packages.add(root_pkg)
+
+                # Match: from pkg import ...
+                m_from = re.match(r'^[ \t]*from[ \t]+([a-zA-Z0-9_.]+)[ \t]+import', line)
+                if m_from:
+                    mod = m_from.group(1).strip()
+                    if not mod.startswith("."):
+                        root_pkg = mod.split(".")[0].strip()
+                        if root_pkg and root_pkg not in PYTHON_STDLIB and root_pkg.lower() not in local_set:
+                            packages.add(root_pkg)
+
+    return sorted(list(packages))
 
 
 async def check_npm_package(client: httpx.AsyncClient, package_name: str) -> bool:
     """Returns True if package exists on registry.npmjs.org, False if 404."""
-    url = f"https://registry.npmjs.org/{package_name}"
+    # Ensure package name is clean ASCII and has no spaces or control chars
+    clean_name = re.sub(r"[^a-zA-Z0-9@/_\.\-]", "", package_name.strip())
+    if not clean_name:
+        return True
+    url = f"https://registry.npmjs.org/{clean_name}"
     try:
         res = await client.get(url, timeout=5.0)
         return res.status_code == 200
@@ -121,7 +153,11 @@ async def check_npm_package(client: httpx.AsyncClient, package_name: str) -> boo
 
 async def check_pypi_package(client: httpx.AsyncClient, package_name: str) -> bool:
     """Returns True if package exists on pypi.org, False if 404."""
-    url = f"https://pypi.org/pypi/{package_name}/json"
+    # Ensure package name is clean ASCII without spaces or control chars
+    clean_name = re.sub(r"[^a-zA-Z0-9_\.\-]", "", package_name.strip())
+    if not clean_name:
+        return True
+    url = f"https://pypi.org/pypi/{clean_name}/json"
     try:
         res = await client.get(url, timeout=5.0)
         return res.status_code == 200
@@ -130,12 +166,17 @@ async def check_pypi_package(client: httpx.AsyncClient, package_name: str) -> bo
         return True
 
 
-async def check_packages(code: str, language: str) -> List[Dict[str, Any]]:
+async def check_packages(
+    code: str,
+    language: str,
+    local_modules: Optional[Set[str]] = None
+) -> List[Dict[str, Any]]:
     """
     Check all imported packages against upstream registries.
     Returns critical findings for any hallucinated packages with supply chain impact explanation.
+    Excludes local repository modules and Python standard library modules.
     """
-    packages = extract_imports(code, language)
+    packages = extract_imports(code, language, local_modules=local_modules)
     if not packages:
         return []
 

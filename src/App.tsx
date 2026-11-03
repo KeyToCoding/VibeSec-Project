@@ -12,7 +12,7 @@ import { TrendChart } from "./components/TrendChart";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { CookieBanner } from "./components/CookieBanner";
 import { ScanReportData } from "./types";
-import { getApiUrl, getApiHeaders } from "./config";
+import { getApiUrl, getApiHeaders, ensureAuthenticatedSession } from "./config";
 
 interface StoredScan {
   id: number | string;
@@ -125,7 +125,53 @@ export default function App() {
     }
   };
 
+  const syncServerHistory = async () => {
+    try {
+      const res = await fetch(getApiUrl("/api/history"), {
+        headers: getApiHeaders(),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data) && data.length > 0) {
+          const stored = localStorage.getItem("vibesec_scans") || "[]";
+          const existing = JSON.parse(stored);
+          const existingIds = new Set(existing.map((s: any) => String(s.id || s.scan_id)));
+          const newItems = data
+            .filter((s: any) => s.scan_id && !existingIds.has(String(s.scan_id)))
+            .map((s: any) => ({
+              id: s.scan_id,
+              date: s.created_at || new Date().toISOString(),
+              type: s.input_type || "code",
+              files: s.files_scanned || 1,
+              critical: s.severity_counts?.critical || 0,
+              high: s.severity_counts?.high || 0,
+              medium: s.severity_counts?.medium || 0,
+              riskScore: (s.severity_counts?.critical || 0) * 10 + (s.severity_counts?.high || 0) * 5 + (s.severity_counts?.medium || 0) * 2,
+              vulnerabilities: s.vulnerabilities || [],
+              summary: s.summary || "Scan report",
+              primary_model: s.primary_model || "qwen2.5-coder:7b",
+              scan_time_seconds: s.scan_time_seconds || 1.0,
+              hallucinated_packages: s.hallucinated_packages || [],
+              severity_counts: s.severity_counts,
+            }));
+
+          if (newItems.length > 0) {
+            const combined = [...newItems, ...existing].slice(0, 50);
+            localStorage.setItem("vibesec_scans", JSON.stringify(combined));
+            localStorage.setItem("vibesec_history", JSON.stringify(combined));
+            loadHistoryAndStats();
+          }
+        }
+      }
+    } catch {
+      // non-blocking
+    }
+  };
+
   useEffect(() => {
+    ensureAuthenticatedSession().then(() => {
+      syncServerHistory();
+    });
     loadHistoryAndStats();
   }, []);
 

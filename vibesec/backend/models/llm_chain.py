@@ -54,7 +54,7 @@ def get_ollama_config() -> Tuple[str, str]:
     # Environment variables explicitly supplied by the process take precedence;
     # otherwise values loaded from the backend .env file are used.
     # Default to local 127.0.0.1:11434 for zero-config development.
-    raw_url = os.getenv("OLLAMA_URL") or os.getenv("OLLAMA_BASE_URL") or os.getenv("COLAB_NGROK_URL") or "http://127.0.0.1:11434"
+    raw_url = os.getenv("OLLAMA_URL") or os.getenv("OLLAMA_PROXY_URL") or os.getenv("OLLAMA_BASE_URL") or os.getenv("COLAB_NGROK_URL") or "http://127.0.0.1:11434"
     base_url = _normalize_ollama_base_url(raw_url)
     model = (os.getenv("OLLAMA_MODEL") or "qwen2.5-coder:7b").strip()
     return base_url, model
@@ -128,7 +128,7 @@ async def _call_ollama(
         "keep_alive": "10m",
         "options": {
             "temperature": 0.2,
-            "num_predict": 180 if task in ("chat", "patch_generation") else 512,
+            "num_predict": 140 if task == "chat" else (220 if task == "patch_generation" else 180),
         },
     }
 
@@ -136,10 +136,11 @@ async def _call_ollama(
     if task != "chat":
         payload["format"] = "json"
 
-    # Keep the model request inside the FastAPI chat deadline (~58s).
+    # Calibrated timeouts: 85s for patch generation, 60s for chat/analysis
+    read_timeout = 85.0 if task == "patch_generation" else 60.0
     timeout = httpx.Timeout(
         connect=12.0,
-        read=52.0,
+        read=read_timeout,
         write=12.0,
         pool=8.0,
     )

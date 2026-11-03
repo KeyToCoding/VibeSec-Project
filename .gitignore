@@ -35,6 +35,9 @@ vibesec-pids.json
 .env*
 !.env.example
 !**/.env.example
+.proxy_token
+scripts/.proxy_token
+*.token
 
 # OS artifacts
 .DS_Store

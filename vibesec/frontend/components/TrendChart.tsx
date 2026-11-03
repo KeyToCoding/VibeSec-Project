@@ -105,22 +105,6 @@ export const TrendChart: React.FC<TrendChartProps> = (props) => {
     return normalized.slice(0, 8).reverse();
   }, [rawData]);
 
-  // Console.log props & normalized data as required
-  useEffect(() => {
-    console.log("TrendChart props/data:", {
-      propsData: props.data || props.scans || props.history,
-      scansCount: chartData.length,
-      chartData: chartData.map((d) => ({
-        date: d.date,
-        critical: d.critical,
-        high: d.high,
-        medium: d.medium,
-        total: (d.critical || 0) + (d.high || 0) + (d.medium || 0),
-        riskScore: d.riskScore,
-      })),
-    });
-  }, [props.data, props.scans, props.history, chartData]);
-
   const formatDate = (dateStr?: string) => {
     if (!dateStr) return "Recent";
     try {

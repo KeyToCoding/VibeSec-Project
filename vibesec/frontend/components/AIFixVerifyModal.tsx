@@ -114,6 +114,7 @@ export const AIFixVerifyModal: React.FC<AIFixVerifyModalProps> = ({
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
+    const timeoutId = setTimeout(() => controller.abort(), 105000);
 
     try {
       const response = await fetch(getApiUrl("/api/remediate/propose-patch"), {
@@ -139,12 +140,14 @@ export const AIFixVerifyModal: React.FC<AIFixVerifyModalProps> = ({
       setStep("review");
     } catch (err: any) {
       if (err.name === "AbortError") {
+        setErrorMessage("Patch generation request timed out after 105 seconds. Check if Ollama or the Cloudflare tunnel is running.");
         setStep("initial");
         return;
       }
       setErrorMessage(err.message || "Could not generate patch. Ensure AI provider (Gemini / Ollama) is configured and active.");
       setStep("initial");
     } finally {
+      clearTimeout(timeoutId);
       abortControllerRef.current = null;
     }
   };

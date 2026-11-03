@@ -44,6 +44,27 @@ PLACEHOLDER_SUBSTRINGS = [
     "http://", "https://", "not-a-real", "test-token"
 ]
 
+KNOWN_AWS_EXAMPLES = {
+    "AKIAIOSFODNN7EXAMPLE",
+    "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    "AKIAEXAMPLEKEY",
+    "EXAMPLEKEY",
+}
+
+
+def is_aws_example_credential(val: str) -> bool:
+    """Check if value is an official AWS documentation example credential."""
+    if not val:
+        return False
+    cleaned = val.strip().strip("'\"").strip()
+    if cleaned in KNOWN_AWS_EXAMPLES:
+        return True
+    if cleaned.startswith("AKIA") and "EXAMPLE" in cleaned.upper():
+        return True
+    if "EXAMPLEKEY" in cleaned.upper():
+        return True
+    return False
+
 
 def is_env_template_filename(path: str) -> bool:
     """Check if the filename indicates an example or template."""
@@ -194,6 +215,9 @@ def is_placeholder_value(val: str) -> bool:
     """Determine if an environment variable value is a dummy/template placeholder."""
     cleaned = val.strip().strip("'\"").strip()
     if not cleaned:
+        return True
+
+    if is_aws_example_credential(cleaned):
         return True
 
     # Check for angle brackets, braces, parentheses placeholders: <your_key>, [key], {key}, *(...)*

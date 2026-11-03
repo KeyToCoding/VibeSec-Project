@@ -231,6 +231,19 @@ async def _download_and_scan_archive(
         else:
             files_skipped.append(normalized)
 
+    local_modules: Set[str] = set()
+    for info in namelist:
+        p = info.replace("\\", "/").rstrip("/")
+        parts = p.split("/")
+        subparts = parts[1:] if len(parts) > 1 else parts
+        if subparts:
+            top_dir = subparts[0]
+            if top_dir and "." not in top_dir:
+                local_modules.add(top_dir.lower())
+            filename = subparts[-1]
+            if filename.lower().endswith(".py"):
+                local_modules.add(filename[:-3].lower())
+
     # Audit up to max_files candidate source files
     for path, ext, zip_info in candidates[:max_files]:
         if total_uncompressed + zip_info.file_size > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
@@ -260,7 +273,7 @@ async def _download_and_scan_archive(
                 secrets_found = check_secrets_in_text(code_text, path)
                 all_vulnerabilities.extend(secrets_found)
                 lang = SUPPORTED_EXTENSIONS.get(ext, "javascript")
-                scan_rep = await scan_code(code_text[:50000], language=lang, filename=path)
+                scan_rep = await scan_code(code_text[:50000], language=lang, filename=path, local_modules=local_modules)
                 all_vulnerabilities.extend(scan_rep.get("vulnerabilities", []))
                 all_hallucinations.extend(scan_rep.get("hallucinated_packages", []))
         except Exception as e_file:
@@ -352,6 +365,18 @@ async def scan_github(repo_url: str, max_files: int = 15) -> Dict[str, Any]:
                     )
                 else:
                     tree_items = tree_resp.json().get("tree", [])
+                    local_modules: Set[str] = set()
+                    for item in tree_items:
+                        p = item.get("path", "").replace("\\", "/").rstrip("/")
+                        parts = p.split("/")
+                        if parts:
+                            top_dir = parts[0]
+                            if top_dir and "." not in top_dir:
+                                local_modules.add(top_dir.lower())
+                            filename = parts[-1]
+                            if filename.lower().endswith(".py"):
+                                local_modules.add(filename[:-3].lower())
+
                     candidates = []
                     for item in tree_items:
                         path = item.get("path", "")
@@ -400,7 +425,7 @@ async def scan_github(repo_url: str, max_files: int = 15) -> Dict[str, Any]:
                                     secrets_found = check_secrets_in_text(code_text, path)
                                     all_vulnerabilities.extend(secrets_found)
                                     lang = SUPPORTED_EXTENSIONS.get(ext, "javascript")
-                                    scan_rep = await scan_code(code_text[:50000], language=lang, filename=path)
+                                    scan_rep = await scan_code(code_text[:50000], language=lang, filename=path, local_modules=local_modules)
                                     all_vulnerabilities.extend(scan_rep.get("vulnerabilities", []))
                                     all_hallucinations.extend(scan_rep.get("hallucinated_packages", []))
                         except Exception as e_file:

@@ -46,8 +46,9 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.setHeader(
       'Access-Control-Allow-Headers',
-      'Content-Type, Authorization, Accept, X-Requested-With, X-Session-ID, X-Internal-Token'
+      'Content-Type, Authorization, Accept, X-Requested-With, X-Session-ID, X-Session-Token, X-Session-Signature'
     );
+    res.setHeader('Access-Control-Expose-Headers', 'X-Session-ID, X-Session-Token');
   }
 
   if (req.method === 'OPTIONS') {
@@ -490,277 +491,83 @@ app.get('/api/health', async (_req, res) => {
   }
 });
 
-// 2. SCAN CODE
+// 2. SCAN CODE — Authoritative scan via FastAPI
 app.post('/api/scan/code', rateLimit(60), async (req, res) => {
-  const startTime = Date.now();
   const { code, language = 'python', filename = 'snippet' } = req.body;
 
   if (!code || typeof code !== 'string') {
     return res.status(400).json({ error: 'Code content must be provided' });
   }
 
-  // Run static pattern engine
-  const staticHits: any[] = [];
-  const lines = code.split('\n');
-  for (const pattern of STATIC_SECURITY_PATTERNS) {
-    for (let i = 0; i < lines.length; i++) {
-      if (pattern.regex.test(lines[i])) {
-        const startLine = Math.max(0, i - 2);
-        const endLine = Math.min(lines.length, i + 3);
-        const snippet = lines.slice(startLine, endLine).join('\n');
-        staticHits.push({
-          title: pattern.title,
-          severity: pattern.severity,
-          owasp: pattern.owasp,
-          description: pattern.description,
-          attack_scenario: pattern.attack_scenario,
-          line_hint: i + 1,
-          confidence: "high",
-          fix: pattern.fix,
-          code_snippet: snippet,
-          file: filename,
-        });
-        break; // One match per pattern per snippet
-      }
+  try {
+    const backendRes = await fetch(`${FASTAPI_URL}/api/scan/code`, {
+      method: 'POST',
+      headers: getInternalHeaders(req, {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      }),
+      body: JSON.stringify({ code, language, filename }),
+      signal: AbortSignal.timeout(60000),
+    });
+
+    const forwardSid = backendRes.headers.get('x-session-id');
+    const forwardTok = backendRes.headers.get('x-session-token');
+    if (forwardSid) res.setHeader('X-Session-ID', forwardSid);
+    if (forwardTok) res.setHeader('X-Session-Token', forwardTok);
+
+    if (backendRes.ok) {
+      const data = await backendRes.json();
+      scanHistory.unshift(data);
+      return res.json(data);
+    } else {
+      const errJson = await backendRes.json().catch(() => null);
+      return res.status(backendRes.status).json(errJson || { error: `Code scan failed with status ${backendRes.status}` });
     }
+  } catch (err: any) {
+    const timedOut = err?.name === 'TimeoutError' || err?.name === 'AbortError';
+    return res.status(timedOut ? 504 : 503).json({
+      error: timedOut ? 'Code scan timed out.' : `VibeSec FastAPI backend is unavailable at ${FASTAPI_URL}. Ensure FastAPI is operational.`,
+      detail: timedOut ? 'Request exceeded the backend processing deadline.' : 'FastAPI scanner service is unreachable.',
+    });
   }
-
-  // Hallucination check
-  const packages = extractCodeImports(code, language);
-  const hallucinated: any[] = [];
-  const isPython = language.toLowerCase().includes('py');
-
-  for (const pkg of packages) {
-    const exists = isPython ? await checkPyPiPackage(pkg) : await checkNpmPackage(pkg);
-    if (!exists) {
-      hallucinated.push({
-        package: pkg,
-        ecosystem: isPython ? 'PyPI' : 'npm',
-        status: 'hallucinated',
-        severity: 'critical',
-        owasp: 'A06:2021-Vulnerable and Outdated Components',
-        title: `Hallucinated Dependency: ${pkg}`,
-        description: `The package '${pkg}' was invented by AI generation and does not exist in the official ${isPython ? 'PyPI' : 'npm'} registry.`,
-        risk_analysis: `Package hallucination risk: Malicious actors search open source repositories for non-existent imports, register the namespace ('slopsquatting'), and execute arbitrary malware upon install.`,
-        attack_scenario: `An attacker registers '${pkg}' on ${isPython ? 'PyPI' : 'npm'}. When a developer or CI/CD runner executes 'install', the attacker's payload executes with developer system privileges.`,
-        fix: `Remove the hallucinated import '${pkg}' or verify the correct library name.`,
-      });
-    }
-  }
-
-  // AI review
-  const aiResult = await analyzeWithAI(code, language, staticHits);
-  const allVulns = [...aiResult.findings, ...hallucinated];
-
-  const counts = { critical: 0, high: 0, medium: 0, low: 0, safe: 0 };
-  if (allVulns.length === 0) {
-    counts.safe = 1;
-  } else {
-    for (const v of allVulns) {
-      const sev = (v.severity || 'medium').toLowerCase() as keyof typeof counts;
-      if (counts[sev] !== undefined) counts[sev]++;
-    }
-  }
-
-  const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-  const resolvedSession = resolveSessionForScan(req, res);
-  const scanRecord: ScanRecord = {
-    scan_id: `vibesec-${Date.now()}`,
-    created_at: new Date().toISOString(),
-    session_id: resolvedSession.sessionId,
-    session_token: resolvedSession.sessionToken,
-    input_type: 'code',
-    filename,
-    vulnerabilities: allVulns,
-    hallucinated_packages: hallucinated,
-    severity_counts: counts,
-    files_scanned: 1,
-    files_skipped: [],
-    summary: `Audit complete in ${duration}s. Found ${allVulns.length} vulnerabilities across ${filename} (${language}).`,
-    primary_model: aiResult.model,
-    scan_time_seconds: parseFloat(duration),
-  };
-
-  scanHistory.unshift(scanRecord);
-  res.json(scanRecord);
 });
 
-// 3. SCAN URL (with SSRF protection & rate limiting)
+// 3. SCAN URL — Authoritative scan via FastAPI
 app.post('/api/scan/url', rateLimit(30), async (req, res) => {
-  const startTime = Date.now();
   let { url } = req.body;
   if (!url || typeof url !== 'string') return res.status(400).json({ error: 'URL is required.' });
 
-  // SSRF Protection: Check that the URL is public and does not point to internal/metadata IPs
-  const safeCheck = await validateSafePublicUrl(url);
-  if (!safeCheck.valid) {
-    return res.status(400).json({ error: safeCheck.error });
-  }
-  url = safeCheck.normalizedUrl!;
-
-  const vulns: any[] = [];
-  const headerStatus: { present: Record<string, string>; missing: Record<string, string> } = {
-    present: {},
-    missing: {},
-  };
-
-  const expectedHeaders: Record<string, { title: string; sev: string; desc: string; fix: string }> = {
-    'Strict-Transport-Security': {
-      title: 'Missing HTTP Strict Transport Security (HSTS)',
-      sev: 'high',
-      desc: 'The server does not enforce HTTPS communication via Strict-Transport-Security header.',
-      fix: 'Add Strict-Transport-Security: max-age=31536000; includeSubDomains; preload'
-    },
-    'Content-Security-Policy': {
-      title: 'Missing Content-Security-Policy (CSP)',
-      sev: 'high',
-      desc: 'No Content-Security-Policy header defined. The site is vulnerable to Cross-Site Scripting (XSS).',
-      fix: "Configure a restrictive Content-Security-Policy header (e.g., default-src 'self')"
-    },
-    'X-Frame-Options': {
-      title: 'Missing X-Frame-Options (Clickjacking Risk)',
-      sev: 'medium',
-      desc: 'Without X-Frame-Options or CSP frame-ancestors, the site can be embedded in malicious iframes.',
-      fix: 'Set X-Frame-Options: SAMEORIGIN or DENY'
-    },
-    'X-Content-Type-Options': {
-      title: 'Missing X-Content-Type-Options',
-      sev: 'low',
-      desc: 'MIME-sniffing protection disabled.',
-      fix: 'Set X-Content-Type-Options: nosniff'
-    }
-  };
-
-  let jsFilesScanned: string[] = [];
-
   try {
-    const fetchResp = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 VibeSec-Auditor/1.0' },
-      signal: AbortSignal.timeout(10000),
-      redirect: 'follow',
+    const backendRes = await fetch(`${FASTAPI_URL}/api/scan/url`, {
+      method: 'POST',
+      headers: getInternalHeaders(req, {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      }),
+      body: JSON.stringify({ url }),
+      signal: AbortSignal.timeout(45000),
     });
 
-    const headers = fetchResp.headers;
-    for (const [headerKey, meta] of Object.entries(expectedHeaders)) {
-      const val = headers.get(headerKey.toLowerCase()) || headers.get(headerKey);
-      if (val) {
-        headerStatus.present[headerKey] = val;
-      } else {
-        headerStatus.missing[headerKey] = meta.desc;
-        vulns.push({
-          title: meta.title,
-          severity: meta.sev,
-          owasp: 'A05:2021-Security Misconfiguration',
-          description: meta.desc,
-          attack_scenario: 'Attacker leverages lack of browser restrictions to perform clickjacking or unauthorized script injection.',
-          file: url,
-          line_hint: 0,
-          confidence: 'high',
-          fix: meta.fix,
-        });
-      }
-    }
+    const forwardSid = backendRes.headers.get('x-session-id');
+    const forwardTok = backendRes.headers.get('x-session-token');
+    if (forwardSid) res.setHeader('X-Session-ID', forwardSid);
+    if (forwardTok) res.setHeader('X-Session-Token', forwardTok);
 
-    const html = await fetchResp.text();
-
-    // Check secrets in HTML
-    for (const pattern of STATIC_SECURITY_PATTERNS) {
-      if (pattern.id === 'secrets-hardcoded' && pattern.regex.test(html)) {
-        vulns.push({
-          title: 'Exposed API Token in Public HTML',
-          severity: 'critical',
-          owasp: 'A07:2021-Identification and Authentication Failures',
-          description: 'A hardcoded API secret or credential token was found in the public web page response.',
-          attack_scenario: 'Attackers scraping website assets extract keys and compromise backends.',
-          file: url,
-          line_hint: 1,
-          confidence: 'high',
-          fix: 'Revoke and remove private credentials from client-facing assets.',
-        });
-      }
-    }
-
-    // Extract script tags
-    const scriptRegex = /<script[^>]+src=["']([^"']+)["']/gi;
-    let match;
-    const foundScripts: string[] = [];
-    while ((match = scriptRegex.exec(html)) !== null) {
-      try {
-        const resolved = new URL(match[1], url).toString();
-        foundScripts.push(resolved);
-      } catch {}
-    }
-    jsFilesScanned = foundScripts.slice(0, 4);
-
-    // Fetch up to 3 scripts and check for exposed tokens (with SSRF protection on script sources)
-    for (const sUrl of jsFilesScanned) {
-      try {
-        const scriptCheck = await validateSafePublicUrl(sUrl);
-        if (!scriptCheck.valid) continue;
-        const jsRes = await fetch(scriptCheck.normalizedUrl!, { signal: AbortSignal.timeout(4000) });
-        if (jsRes.ok) {
-          const jsContent = await jsRes.text();
-          if (STATIC_SECURITY_PATTERNS.find(p => p.id === 'secrets-hardcoded')?.regex.test(jsContent)) {
-            vulns.push({
-              title: 'Exposed Credential in JavaScript Bundle',
-              severity: 'critical',
-              owasp: 'A07:2021-Identification and Authentication Failures',
-              description: `API token or secret key found inside client script ${sUrl}`,
-              attack_scenario: 'Adversaries scrape JS bundles for third-party keys.',
-              file: sUrl,
-              line_hint: 1,
-              confidence: 'high',
-              fix: 'Store API keys on backend servers and route client requests through authenticated proxies.',
-            });
-          }
-        }
-      } catch {}
+    if (backendRes.ok) {
+      const data = await backendRes.json();
+      scanHistory.unshift(data);
+      return res.json(data);
+    } else {
+      const errJson = await backendRes.json().catch(() => null);
+      return res.status(backendRes.status).json(errJson || { error: `URL scan failed with status ${backendRes.status}` });
     }
   } catch (err: any) {
-    vulns.push({
-      title: 'Target Unreachable or Request Timeout',
-      severity: 'high',
-      owasp: 'A05:2021-Security Misconfiguration',
-      description: `Failed to inspect URL: ${err?.message || 'Connection refused'}`,
-      attack_scenario: 'Service unavailable or blocking security probes.',
-      file: url,
-      line_hint: 0,
-      confidence: 'high',
-      fix: 'Ensure the server is running and accessible over public HTTP/HTTPS.',
+    const timedOut = err?.name === 'TimeoutError' || err?.name === 'AbortError';
+    return res.status(timedOut ? 504 : 503).json({
+      error: timedOut ? 'URL scan timed out.' : `VibeSec FastAPI backend is unavailable at ${FASTAPI_URL}. Ensure FastAPI is operational.`,
+      detail: timedOut ? 'Request exceeded the backend processing deadline.' : 'FastAPI scanner service is unreachable.',
     });
   }
-
-  const counts = { critical: 0, high: 0, medium: 0, low: 0, safe: 0 };
-  if (vulns.length === 0) {
-    counts.safe = 1;
-  } else {
-    for (const v of vulns) {
-      const sev = (v.severity || 'medium').toLowerCase() as keyof typeof counts;
-      if (counts[sev] !== undefined) counts[sev]++;
-    }
-  }
-
-  const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-  const resolvedSession = resolveSessionForScan(req, res);
-  const scanRecord: ScanRecord = {
-    scan_id: `vibesec-${Date.now()}`,
-    created_at: new Date().toISOString(),
-    session_id: resolvedSession.sessionId,
-    session_token: resolvedSession.sessionToken,
-    input_type: 'url',
-    target: url,
-    vulnerabilities: vulns,
-    severity_counts: counts,
-    files_scanned: 1 + jsFilesScanned.length,
-    files_skipped: [],
-    header_status: headerStatus,
-    summary: `URL scan of ${url} completed in ${duration}s. Evaluated ${1 + jsFilesScanned.length} assets with ${vulns.length} vulnerabilities detected.`,
-    primary_model: 'VibeSec Web Inspector',
-    scan_time_seconds: parseFloat(duration),
-  };
-
-  scanHistory.unshift(scanRecord);
-  res.json(scanRecord);
 });
 
 // GitHub Headers helper attaching optional GITHUB_TOKEN and GitHub API standards
@@ -1543,7 +1350,7 @@ app.get('/api/session', (req, res) => {
   return res.json({ session_id: newSid, session_token: newToken, authenticated: true });
 });
 
-app.get('/api/history', (req, res) => {
+app.get('/api/history', async (req, res) => {
   let clientSid = ((req.headers['x-session-id'] as string) || (req.query.session_id as string) || '').trim();
   let clientToken = ((req.headers['x-session-token'] as string) || (req.headers['x-session-signature'] as string) || (req.query.session_token as string) || '').trim();
 
@@ -1562,6 +1369,28 @@ app.get('/api/history', (req, res) => {
     });
   }
 
+  // 1. First attempt to fetch from authoritative FastAPI backend
+  try {
+    const backendRes = await fetch(`${FASTAPI_URL}/api/history`, {
+      method: 'GET',
+      headers: getInternalHeaders(req, {
+        'Accept': 'application/json',
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (backendRes.ok) {
+      const data = await backendRes.json();
+      return res.json(data);
+    } else if (backendRes.status === 401) {
+      const errJson = await backendRes.json().catch(() => null);
+      return res.status(401).json(errJson || { error: 'Unauthorized session.' });
+    }
+  } catch {
+    // If FastAPI is temporarily unreachable, fallback to verified local ledger
+  }
+
+  // 2. Fallback to local verified session
   const authenticatedSid = getAuthenticatedSession(req);
   if (!authenticatedSid) {
     if (clientSid || clientToken) {
@@ -1658,7 +1487,7 @@ app.post(['/api/chat', '/api/chat/stream'], rateLimit(40), async (req, res) => {
         context: body.context ?? null,
         stream: isStream,
       }),
-      signal: AbortSignal.timeout(65000),
+      signal: AbortSignal.timeout(70000),
     });
 
     const contentType = backendRes.headers.get('content-type') || 'application/json';
@@ -1705,7 +1534,7 @@ app.post('/api/remediate/propose-patch', rateLimit(30), async (req, res) => {
         ...(sessionId ? { 'X-Session-ID': sessionId } : {}),
       }),
       body: JSON.stringify(req.body),
-      signal: AbortSignal.timeout(65000),
+      signal: AbortSignal.timeout(100000),
     });
 
     const responseBody = await backendRes.text();
@@ -1769,28 +1598,43 @@ app.post('/api/remediate/verify-patch', rateLimit(30), async (req, res) => {
   }
 });
 
-// 7. PROJECT ZIP GENERATOR (Download complete 20 files project bundle)
+// 7. PROJECT ZIP GENERATOR (Download complete React/Vite/FastAPI project bundle)
 app.get('/api/download-project-zip', async (req, res) => {
   try {
     const zip = new JSZip();
 
-    // Read all files from /vibesec/ recursively
-    const vibesecRoot = path.resolve(__dirname, 'vibesec');
+    const rootDir = __dirname;
+    const EXCLUDED_DIRS = new Set([
+      'node_modules', '.git', 'dist', '.venv', 'venv', '__pycache__',
+      '.next', '.semgrep-env', 'brain', '.vscode', '.idea'
+    ]);
+    const EXCLUDED_EXTENSIONS = new Set(['.pyc', '.pyo', '.token', '.tmp']);
+    const EXCLUDED_FILES = new Set(['.env', '.proxy_token']);
+
     function addDirToZip(dirPath: string, zipFolder: JSZip) {
       if (!fs.existsSync(dirPath)) return;
       const entries = fs.readdirSync(dirPath, { withFileTypes: true });
       for (const entry of entries) {
+        if (EXCLUDED_DIRS.has(entry.name) || EXCLUDED_FILES.has(entry.name)) continue;
         const fullPath = path.join(dirPath, entry.name);
         if (entry.isDirectory()) {
           addDirToZip(fullPath, zipFolder.folder(entry.name)!);
         } else {
-          const fileData = fs.readFileSync(fullPath);
-          zipFolder.file(entry.name, fileData);
+          const ext = path.extname(entry.name).toLowerCase();
+          if (EXCLUDED_EXTENSIONS.has(ext)) continue;
+          try {
+            const stat = fs.statSync(fullPath);
+            if (stat.size > 15 * 1024 * 1024) continue; // Skip large binaries
+            const fileData = fs.readFileSync(fullPath);
+            zipFolder.file(entry.name, fileData);
+          } catch {
+            // Ignore unreadable or locked file
+          }
         }
       }
     }
 
-    addDirToZip(vibesecRoot, zip);
+    addDirToZip(rootDir, zip);
 
     // Also include a comprehensive README for Kartikey's NIELIT Major Project
     zip.file('README.md', `# VibeSec — AI-Powered Security Scanner for AI-Generated Code
@@ -1800,27 +1644,23 @@ Author: Kartikey Vishwakarma
 ## Overview
 VibeSec is an enterprise-grade cybersecurity scanning engine tailored for detecting vulnerabilities introduced by LLMs and AI code assistants.
 
-### Core Pillars
-1. Static Analysis (Semgrep rules + AST heuristics)
-2. Deep AI Reasoning Agent (Ollama qwen2.5-coder:7b with Groq & Gemini fallbacks)
-3. Hallucinated Dependency & Slopsquatting Detection (npm registry & PyPI verification)
-4. Multi-Input Pipeline:
-   - Direct Code Paste
-   - Live Website URL (headers, cookies, JS assets)
-   - File/ZIP Upload (strict vendor skip: node_modules, .git, venv)
-   - Public GitHub Repository (REST API tree traversal)
+### Core Architecture
+- **Frontend**: React 18, Vite, Tailwind CSS, Lucide Icons, Recharts
+- **API Gateway**: Express, TypeScript, Server-Sent Events, Rate Limiting
+- **Authoritative Scanner Engine**: FastAPI, Python 3.11, AST Analysis, Semgrep Engine
+- **AI Model**: Ollama (qwen2.5-coder:7b) via Authenticated Local Proxy & Cloudflare Tunnel
 
 ## Running Backend (FastAPI)
 \`\`\`bash
 cd vibesec/backend
+python -m venv .venv
+.\\.venv\\Scripts\\activate  # on Windows (or source .venv/bin/activate on Linux/Mac)
 pip install -r requirements.txt
-cp .env .env.local
 uvicorn main:app --reload --port 8000
 \`\`\`
 
-## Running Frontend (Next.js 14)
+## Running Frontend & Gateway (React + Vite + Express)
 \`\`\`bash
-cd vibesec/frontend
 npm install
 npm run dev
 \`\`\`

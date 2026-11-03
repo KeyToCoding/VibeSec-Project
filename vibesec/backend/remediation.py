@@ -93,6 +93,58 @@ def _clean_json_response(raw: str) -> str:
     return text
 
 
+def apply_snippet_patch_to_code(code: str, snippet: str, patch: str) -> str:
+    """Safely integrate a patch snippet into full code preserving indentation and surrounding structure."""
+    if not code or not snippet or not patch:
+        return patch or code
+
+    if len(patch) >= len(code) * 0.8 and ("def " in patch or "class " in patch):
+        return patch
+
+    if snippet in code:
+        return code.replace(snippet, patch, 1)
+
+    code_lines = code.splitlines()
+    snip_lines = [line.strip() for line in snippet.splitlines() if line.strip()]
+    if not snip_lines:
+        return patch
+
+    patch_lines = patch.splitlines()
+
+    start_idx = -1
+    for i in range(len(code_lines)):
+        if code_lines[i].strip() == snip_lines[0]:
+            matched = True
+            for j in range(1, len(snip_lines)):
+                if i + j >= len(code_lines) or code_lines[i + j].strip() != snip_lines[j]:
+                    matched = False
+                    break
+            if matched:
+                start_idx = i
+                break
+
+    if start_idx != -1:
+        leading_ws = len(code_lines[start_idx]) - len(code_lines[start_idx].lstrip())
+        orig_indent = code_lines[start_idx][:leading_ws]
+
+        patch_indent_lens = [len(l) - len(l.lstrip()) for l in patch_lines if l.strip()]
+        min_patch_indent = min(patch_indent_lens) if patch_indent_lens else 0
+
+        indented_patch = []
+        for pl in patch_lines:
+            if not pl.strip():
+                indented_patch.append("")
+            else:
+                rel_indent = (len(pl) - len(pl.lstrip())) - min_patch_indent
+                indented_patch.append(orig_indent + (" " * max(0, rel_indent)) + pl.lstrip())
+
+        end_idx = start_idx + len(snip_lines)
+        result_lines = code_lines[:start_idx] + indented_patch + code_lines[end_idx:]
+        return "\n".join(result_lines)
+
+    return patch
+
+
 def generate_unified_diff(original: str, patched: str, filename: str = "snippet") -> str:
     """Generate a clean, readable unified diff between original and patched code."""
     orig_lines = original.splitlines(keepends=True)
@@ -389,17 +441,18 @@ async def propose_remediation_patch(
     if patched_code.strip() == code.strip():
         logger.info("Model suggested identical code without changes")
 
-    unified_diff = generate_unified_diff(code, patched_code, filename=filename)
+    full_patched_code = apply_snippet_patch_to_code(active_code, snippet, patched_code)
+    unified_diff = generate_unified_diff(active_code, full_patched_code, filename=filename)
 
     return {
         "success": True,
-        "patched_code": patched_code,
+        "patched_code": full_patched_code,
         "explanation": explanation or "Security fix addressing the identified vulnerability.",
         "changes_summary": changes_summary if isinstance(changes_summary, list) else [str(changes_summary)],
         "security_caveats": security_caveats or "",
         "unified_diff": unified_diff,
         "model_used": model_used,
-        "original_code": code,
+        "original_code": active_code,
         "filename": filename,
         "language": language
     }

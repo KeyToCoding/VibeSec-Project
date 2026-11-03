@@ -15,6 +15,7 @@ import logging
 from typing import Dict, Any, List, Tuple
 from urllib.parse import urljoin, urlparse
 from .code_scanner import scan_code, compute_severity_counts
+from .env_detector import is_aws_example_credential, is_placeholder_value
 
 logger = logging.getLogger("vibesec.url_scanner")
 
@@ -119,6 +120,8 @@ def check_secrets_in_text(text: str, source_url: str) -> List[Dict[str, Any]]:
             match = pattern.search(line)
             if match:
                 token = match.group(1)
+                if is_placeholder_value(token) or is_aws_example_credential(token):
+                    continue
                 masked_token = token[:4] + "*" * (len(token) - 8) + token[-4:] if len(token) > 10 else "***"
                 findings.append({
                     "title": f"Exposed Credential: {key_type}",

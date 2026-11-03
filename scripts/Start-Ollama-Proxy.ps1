@@ -4,12 +4,14 @@
 param(
     [string]$Token = $env:OLLAMA_PROXY_TOKEN,
     [int]$Port = 11435,
-    [string]$Target = "http://127.0.0.1:11434"
+    [string]$Target = "http://127.0.0.1:11434",
+    [switch]$RotateToken
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $BackendDir = Join-Path $ProjectRoot "vibesec\backend"
+$TokenFile = Join-Path $PSScriptRoot ".proxy_token"
 $VenvPython = Join-Path $BackendDir ".venv\Scripts\python.exe"
 $ProxyScript = Join-Path $ProjectRoot "scripts\ollama_proxy.py"
 
@@ -37,7 +39,20 @@ try {
     Write-Host "    Make sure to start Ollama in another terminal: 'ollama serve'" -ForegroundColor Gray
 }
 
-# 3. Resolve or generate OLLAMA_PROXY_TOKEN
+# 3. Resolve, persist, or rotate OLLAMA_PROXY_TOKEN
+if ($RotateToken) {
+    Write-Host "`n[*] Token rotation requested (-RotateToken)..." -ForegroundColor Yellow
+    $Token = $null
+}
+
+if (-not $Token -and (Test-Path $TokenFile)) {
+    $existing = (Get-Content $TokenFile -Raw).Trim()
+    if ($existing.Length -ge 16) {
+        $Token = $existing
+        Write-Host "[OK] Loaded existing OLLAMA_PROXY_TOKEN from $TokenFile" -ForegroundColor Green
+    }
+}
+
 if (-not $Token) {
     # Check backend .env
     $envFile = Join-Path $BackendDir ".env"
@@ -45,18 +60,26 @@ if (-not $Token) {
         $envMatch = Get-Content $envFile | Select-String "^OLLAMA_PROXY_TOKEN=(.+)$"
         if ($envMatch) {
             $Token = $envMatch.Matches[0].Groups[1].Value.Trim()
+            Write-Host "[OK] Loaded OLLAMA_PROXY_TOKEN from backend .env" -ForegroundColor Green
         }
     }
 }
 
 if (-not $Token) {
-    $bytes = New-Object byte[] 24
+    $bytes = New-Object byte[] 32
     [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
     $Token = -join ($bytes | ForEach-Object { "{0:x2}" -f $_ })
-    Write-Host "`n[!] Generated new secure OLLAMA_PROXY_TOKEN: $Token" -ForegroundColor Yellow
-    Write-Host "    Add this to your Render FastAPI environment variables: OLLAMA_PROXY_TOKEN=$Token" -ForegroundColor Gray
+    # Securely persist token to local ignored file
+    Set-Content -Path $TokenFile -Value $Token -Encoding UTF8 -Force
+    Write-Host "`n[!] Generated new persistent OLLAMA_PROXY_TOKEN and saved to scripts/.proxy_token" -ForegroundColor Yellow
+    Write-Host "    Masked Token: $($Token.Substring(0, 4))...$($Token.Substring($Token.Length - 4))" -ForegroundColor Gray
+    Write-Host "    (Configure this token in your Render FastAPI environment variables: OLLAMA_PROXY_TOKEN)" -ForegroundColor Gray
 } else {
-    Write-Host "`n[OK] Using configured OLLAMA_PROXY_TOKEN." -ForegroundColor Green
+    # Ensure saved to token file for consistency
+    if (-not (Test-Path $TokenFile)) {
+        Set-Content -Path $TokenFile -Value $Token -Encoding UTF8 -Force
+    }
+    Write-Host "[OK] Using configured OLLAMA_PROXY_TOKEN: $($Token.Substring(0, 4))...$($Token.Substring($Token.Length - 4))" -ForegroundColor Green
 }
 
 # 4. Check for cloudflared

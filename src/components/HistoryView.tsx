@@ -7,6 +7,7 @@ import {
   RefreshCw,
   Loader2,
   Calendar,
+  Download,
 } from "lucide-react";
 import { ScanReportData } from "../types";
 import { VulnReport } from "./VulnReport";
@@ -29,13 +30,37 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onBack }) => {
       });
       if (res.ok) {
         const data = await res.json();
-        setHistory(Array.isArray(data) ? data : []);
+        if (Array.isArray(data) && data.length > 0) {
+          setHistory(data);
+          setIsLoading(false);
+          return;
+        }
       }
     } catch {
       // Non-blocking
-    } finally {
-      setIsLoading(false);
     }
+
+    // Local ledger fallback
+    try {
+      const localStr = localStorage.getItem("vibesec_scans") || localStorage.getItem("vibesec_history");
+      if (localStr) {
+        const parsed = JSON.parse(localStr);
+        if (Array.isArray(parsed)) {
+          setHistory(parsed);
+        }
+      }
+    } catch {}
+    setIsLoading(false);
+  };
+
+  const exportHistoryJson = () => {
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(history, null, 2));
+    const downloadAnchor = document.createElement("a");
+    downloadAnchor.setAttribute("href", dataStr);
+    downloadAnchor.setAttribute("download", `vibesec-history-${Date.now()}.json`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
   };
 
   useEffect(() => {
@@ -73,18 +98,29 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onBack }) => {
               Audit Ledger & Past Scans
             </h2>
             <p className="text-xs font-mono text-zinc-400 mt-0.5">
-              Persistent security audit records across all 4 modes
+              Persistent security audit records isolated per authenticated session
             </p>
           </div>
         </div>
 
-        <button
-          onClick={fetchHistory}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0f1316] border border-[#1e2a32] text-xs font-mono text-zinc-300 hover:text-[#00e57a] cursor-pointer"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? "animate-spin" : ""}`} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          {history.length > 0 && (
+            <button
+              onClick={exportHistoryJson}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#00e57a]/15 text-[#00e57a] border border-[#00e57a]/30 text-xs font-mono hover:bg-[#00e57a]/25 transition-colors cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Export JSON</span>
+            </button>
+          )}
+          <button
+            onClick={fetchHistory}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0f1316] border border-[#1e2a32] text-xs font-mono text-zinc-300 hover:text-[#00e57a] cursor-pointer"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       <div className="bg-[#0f1316] border border-[#1e2a32] rounded-2xl overflow-hidden shadow-2xl">

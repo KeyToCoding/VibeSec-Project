@@ -8,7 +8,7 @@ Author: Kartikey Vishwakarma (NIELIT Gorakhpur Major Project)
 import time
 import asyncio
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Set
 from .semgrep_runner import semgrep_scan
 from .vuln_agent import analyze_chunk
 from .hallucination import check_packages
@@ -35,13 +35,14 @@ def compute_severity_counts(vulnerabilities: List[Dict[str, Any]]) -> Dict[str, 
 async def scan_code(
     code: str,
     language: str = "python",
-    filename: str = "snippet"
+    filename: str = "snippet",
+    local_modules: Optional[Set[str]] = None
 ) -> Dict[str, Any]:
     """
     Scan a single block of code:
       1. Semgrep / Static Analysis for initial flags
       2. LLM Verification agent on each chunk (parallelized)
-      3. Package hallucination check against npm/PyPI
+      3. Package hallucination check against npm/PyPI (excluding local repository modules)
     """
     start_time = time.time()
     logger.info(f"Initiating code scan for {filename} ({language}, {len(code)} bytes)")
@@ -55,7 +56,7 @@ async def scan_code(
         analyze_chunk(finding, code, language, filename)
         for finding in semgrep_findings
     ]
-    hallucination_task = check_packages(code, language)
+    hallucination_task = check_packages(code, language, local_modules=local_modules)
 
     # Run AI analysis and dependency check in parallel
     ai_results, hallucinated_pkgs = await asyncio.gather(
@@ -66,10 +67,14 @@ async def scan_code(
     verified_vulns: List[Dict[str, Any]] = []
     for item in ai_results:
         if isinstance(item, dict) and item:
+            item["language"] = language
+            item["file"] = item.get("file") or filename
             verified_vulns.append(item)
 
     # Append hallucinated dependencies to vulnerabilities as CRITICAL supply chain attacks
     for h in hallucinated_pkgs:
+        h["language"] = language
+        h["file"] = h.get("file") or filename
         verified_vulns.append(h)
 
     severity_counts = compute_severity_counts(verified_vulns)

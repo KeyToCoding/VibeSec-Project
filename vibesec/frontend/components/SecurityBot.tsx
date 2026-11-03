@@ -49,8 +49,33 @@ export const SecurityBot: React.FC<SecurityBotProps> = ({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [loadingPhase, setLoadingPhase] = useState("Connecting to model...");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const loadingRef = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  // Progressive loading phase timer
+  useEffect(() => {
+    if (!isLoading) {
+      setLoadingPhase("Connecting to model...");
+      return;
+    }
+    const t1 = setTimeout(() => setLoadingPhase("Analyzing security context..."), 3000);
+    const t2 = setTimeout(() => setLoadingPhase("Synthesizing recommendations..."), 12000);
+    const t3 = setTimeout(() => setLoadingPhase("Finalizing response from qwen2.5-coder:7b..."), 25000);
+
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+    };
+  }, [isLoading]);
+
+  const handleCancelRequest = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+  };
 
   // Mode detection
   const hasVuln = !!currentVuln && !!currentVuln.type;
@@ -141,7 +166,8 @@ export const SecurityBot: React.FC<SecurityBotProps> = ({
     setIsLoading(true);
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 70000);
+    abortControllerRef.current = controller;
+    const timeoutId = setTimeout(() => controller.abort(), 75000);
 
     try {
       const response = await fetch(getApiUrl("/api/chat"), {
@@ -184,26 +210,30 @@ export const SecurityBot: React.FC<SecurityBotProps> = ({
       };
       setMessages((prev) => [...prev.slice(-9), aiReply]);
     } catch (err: any) {
+      const isAbort = err?.name === "AbortError" && !err?.message?.toLowerCase?.().includes("timed out");
       const isTimeout =
-        err?.name === "AbortError" ||
         err?.name === "TimeoutError" ||
         err?.message?.toLowerCase?.().includes("timed out");
 
-      const errorText = isTimeout
-        ? "The AI request took too long. Check that Ollama is running at the configured URL, then retry with a shorter question."
-        : (err?.message || "Unable to connect to the VibeSec AI backend.");
+      let errorText = err?.message || "Unable to connect to the VibeSec AI backend.";
+      if (isAbort) {
+        errorText = "Request cancelled by user.";
+      } else if (isTimeout) {
+        errorText = "The AI request took too long. Check that Ollama is running at the configured URL, then retry with a shorter question.";
+      }
 
       const errorMsg: ChatMessage = {
         role: "assistant",
-        content: `VibeSec AI error: ${errorText}`,
-        model: "error",
-        canRetry: true,
+        content: isAbort ? errorText : `VibeSec AI error: ${errorText}`,
+        model: isAbort ? "cancelled" : "error",
+        canRetry: !isAbort,
         retryText: trimmedMessage,
         timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       };
       setMessages((prev) => [...prev.slice(-9), errorMsg]);
     } finally {
       clearTimeout(timeoutId);
+      abortControllerRef.current = null;
       loadingRef.current = false;
       setIsLoading(false);
     }
@@ -385,14 +415,23 @@ export const SecurityBot: React.FC<SecurityBotProps> = ({
             {/* Typing Dots Animation while loading */}
             {isLoading && (
               <div className="flex flex-col items-start space-y-1">
-                <div className="bg-[var(--card-bg)] border border-[var(--card-border)] rounded-2xl rounded-bl-none px-4 py-3 flex items-center gap-1.5">
-                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-bounce [animation-delay:-0.3s]"></span>
-                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-bounce [animation-delay:-0.15s]"></span>
-                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-bounce"></span>
+                <div className="bg-[var(--card-bg)] border border-[var(--card-border)] rounded-2xl rounded-bl-none px-4 py-3 flex items-center gap-2">
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-bounce [animation-delay:-0.3s]"></span>
+                    <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-bounce [animation-delay:-0.15s]"></span>
+                    <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-bounce"></span>
+                  </div>
+                  <span className="text-[10px] text-[var(--text-secondary)] font-mono ml-1">
+                    {loadingPhase}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleCancelRequest}
+                    className="ml-2 px-1.5 py-0.5 rounded text-[9px] font-mono bg-[var(--danger)]/15 text-[var(--danger)] hover:bg-[var(--danger)]/25 border border-[var(--danger)]/30 cursor-pointer transition-colors"
+                  >
+                    Cancel
+                  </button>
                 </div>
-                <span className="text-[9px] text-[var(--text-secondary)] font-mono px-1">
-                  VibeSec AI thinking...
-                </span>
               </div>
             )}
 

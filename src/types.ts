@@ -13,6 +13,7 @@ export interface Vulnerability {
   code_snippet?: string;
   model_used?: string;
   rule_id?: string;
+  language?: string;
 }
 
 export interface HallucinatedPackage {
