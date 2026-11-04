@@ -8,8 +8,10 @@ coverage/
 
 # Virtual Environments
 .venv/
+.venv*/
 .semgrep-env/
 vibesec/backend/.venv/
+vibesec/backend/.venv*/
 vibesec/backend/.semgrep-env/
 venv/
 env/
@@ -38,6 +40,10 @@ vibesec-pids.json
 .proxy_token
 scripts/.proxy_token
 *.token
+scripts/.tunnel_url
+scripts/.tunnel_active
+.tunnel_url
+.tunnel_active
 
 # OS artifacts
 .DS_Store

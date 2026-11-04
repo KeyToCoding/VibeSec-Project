@@ -8,10 +8,12 @@
  * Also handles anonymous per-user session ID tracking to prevent cross-user scan history leakage.
  */
 
-// Production API base URL provided via Netlify environment variables (e.g., https://vibesec-api.onrender.com)
+// Production API base URL provided via Netlify environment variables (e.g., https://vibesec-express.onrender.com).
+// In local mode (localhost / 127.0.0.1), always use relative paths to guarantee targeting the local Express gateway.
 export const API_BASE_URL: string = (
-  (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_BASE_URL) ||
-  ''
+  (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'))
+    ? ''
+    : ((typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_BASE_URL) || '')
 ).replace(/\/+$/, '');
 
 /**

@@ -2,6 +2,30 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "VibeSec: 0 - Prerequisites Check & Model Setup",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\scripts\\Setup-VibeSec-Prerequisites.ps1"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true,
+        "echo": true,
+        "showReuseMessage": false
+      }
+    },
+    {
       "label": "VibeSec: 1 - Ollama",
       "type": "process",
       "command": "powershell.exe",
@@ -99,13 +123,13 @@
         {
           "owner": "vibesec-tunnel-ready",
           "pattern": {
-            "regexp": "^\\[READY\\] (Cloudflare tunnel URL: https://.*)$",
+            "regexp": "^\\[READY\\] (Cloudflare tunnel URL: https://.*|Local mode active.*)$",
             "message": 1
           },
           "background": {
             "activeOnStart": true,
             "beginsPattern": "^\\[START\\]",
-            "endsPattern": "^\\[READY\\] Cloudflare tunnel URL: https://"
+            "endsPattern": "^\\[READY\\] (Cloudflare tunnel URL: https://|Local mode active.*)"
           }
         }
       ],
@@ -197,7 +221,7 @@
       }
     },
     {
-      "label": "VibeSec: Start All (Antigravity Integrated)",
+      "label": "VibeSec: Start Integrated Services",
       "dependsOn": [
         "VibeSec: 1 - Ollama",
         "VibeSec: 2 - Authenticated Proxy",
@@ -206,16 +230,115 @@
         "VibeSec: 5 - App + Logs"
       ],
       "dependsOrder": "parallel",
-      "problemMatcher": [],
+      "problemMatcher": []
+    },
+    {
+      "label": "VibeSec: Start All (Antigravity Integrated)",
+      "dependsOn": [
+        "VibeSec: 0 - Prerequisites Check & Model Setup",
+        "VibeSec: Start Integrated Services"
+      ],
+      "dependsOrder": "sequence",
       "group": {
         "kind": "build",
         "isDefault": true
       },
+      "problemMatcher": [],
       "presentation": {
         "reveal": "always",
         "panel": "shared",
         "focus": false,
         "echo": false,
+        "showReuseMessage": false
+      }
+    },
+    {
+      "label": "VibeSec: Start Local Services",
+      "dependsOn": [
+        "VibeSec: 1 - Ollama",
+        "VibeSec: 5 - App + Logs"
+      ],
+      "dependsOrder": "parallel",
+      "problemMatcher": []
+    },
+    {
+      "label": "VibeSec: Start All (Local Mode)",
+      "dependsOn": [
+        "VibeSec: 0 - Prerequisites Check & Model Setup",
+        "VibeSec: Start Local Services"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "focus": false,
+        "echo": false,
+        "showReuseMessage": false
+      }
+    },
+    {
+      "label": "VibeSec: Start Remote AI Tunnel (Public Deployment)",
+      "dependsOn": [
+        "VibeSec: 2 - Authenticated Proxy",
+        "VibeSec: 3 - Cloudflare Tunnel",
+        "VibeSec: 4 - Connection Details (URL + Token)"
+      ],
+      "dependsOrder": "parallel",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "focus": false,
+        "echo": false,
+        "showReuseMessage": false
+      }
+    },
+    {
+      "label": "VibeSec: Stop All Services",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\scripts\\Stop-VibeSec-All.ps1"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true,
+        "echo": true,
+        "showReuseMessage": false
+      }
+    },
+    {
+      "label": "VibeSec: Stop Remote AI Tunnel",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\scripts\\Stop-VibeSec-Tunnel.ps1"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true,
+        "echo": true,
         "showReuseMessage": false
       }
     },

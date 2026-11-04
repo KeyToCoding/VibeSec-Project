@@ -244,9 +244,43 @@ export const SecurityBot: React.FC<SecurityBotProps> = ({
     sendMessage(inputValue);
   };
 
-  // Helper to format code blocks inside assistant messages
+  // Helper to format inline code and bold markdown text
+  const renderFormattedInline = (text: string) => {
+    const codeParts = text.split(/(`[^`]+`)/g);
+    return codeParts.map((codePart, idx) => {
+      if (codePart.startsWith("`") && codePart.endsWith("`")) {
+        return (
+          <code
+            key={idx}
+            className="font-mono text-[11px] bg-[#0d0d1a] text-[#10b981] px-1.5 py-0.5 rounded border border-[#2d2b55]"
+          >
+            {codePart.slice(1, -1)}
+          </code>
+        );
+      }
+
+      const boldParts = codePart.split(/(\?\?[^*]+\?\?|\*\*[^*]+\*\*)/g);
+      return boldParts.map((boldPart, bIdx) => {
+        if (boldPart.startsWith("**") && boldPart.endsWith("**") && boldPart.length > 4) {
+          return (
+            <strong key={`${idx}-${bIdx}`} className="font-semibold text-white">
+              {boldPart.slice(2, -2)}
+            </strong>
+          );
+        }
+        return <span key={`${idx}-${bIdx}`}>{boldPart}</span>;
+      });
+    });
+  };
+
+  // Helper to format code blocks and rich markdown inside assistant messages
   const renderMessageContent = (content: string) => {
-    const parts = content.split(/(```[\s\S]*?```)/g);
+    let safeContent = content;
+    const fenceCount = (safeContent.match(/```/g) || []).length;
+    if (fenceCount % 2 !== 0) {
+      safeContent += "\n```";
+    }
+    const parts = safeContent.split(/(```[\s\S]*?```)/g);
 
     return parts.map((part, i) => {
       if (part.startsWith("```") && part.endsWith("```")) {
@@ -256,18 +290,16 @@ export const SecurityBot: React.FC<SecurityBotProps> = ({
 
         return (
           <div key={i} className="my-2 rounded-lg overflow-hidden border border-[#2d2b55] bg-[#0d0d1a]">
-            {language && (
-              <div className="bg-[#12082a] px-3 py-1 text-[10px] text-[#8b8fa8] font-mono border-b border-[#2d2b55] flex justify-between items-center">
-                <span>{language}</span>
-                <button
-                  type="button"
-                  onClick={() => navigator.clipboard.writeText(code)}
-                  className="hover:text-white transition-colors"
-                >
-                  Copy
-                </button>
-              </div>
-            )}
+            <div className="bg-[#12082a] px-3 py-1 text-[10px] text-[#8b8fa8] font-mono border-b border-[#2d2b55] flex justify-between items-center">
+              <span>{language || "code"}</span>
+              <button
+                type="button"
+                onClick={() => navigator.clipboard.writeText(code)}
+                className="hover:text-white transition-colors cursor-pointer"
+              >
+                Copy
+              </button>
+            </div>
             <pre className="p-2.5 font-mono text-xs text-[#10b981] overflow-x-auto whitespace-pre-wrap leading-relaxed">
               <code>{code}</code>
             </pre>
@@ -275,24 +307,64 @@ export const SecurityBot: React.FC<SecurityBotProps> = ({
         );
       }
 
-      // Regular text formatting (inline code and bold text)
-      const subParts = part.split(/(`[^`]+`)/g);
+      const lines = part.split("\n");
       return (
-        <span key={i} className="whitespace-pre-wrap">
-          {subParts.map((sub, j) => {
-            if (sub.startsWith("`") && sub.endsWith("`")) {
+        <div key={i} className="space-y-1">
+          {lines.map((line, lineIdx) => {
+            const trimmed = line.trim();
+            if (!trimmed) {
+              return <div key={lineIdx} className="h-1" />;
+            }
+
+            if (trimmed.startsWith("### ")) {
               return (
-                <code
-                  key={j}
-                  className="font-mono text-[11px] bg-[#0d0d1a] text-[#10b981] px-1.5 py-0.5 rounded border border-[#2d2b55]"
-                >
-                  {sub.slice(1, -1)}
-                </code>
+                <div key={lineIdx} className="font-semibold text-[13px] text-white mt-1.5 mb-0.5">
+                  {renderFormattedInline(trimmed.slice(4))}
+                </div>
               );
             }
-            return sub;
+            if (trimmed.startsWith("## ")) {
+              return (
+                <div key={lineIdx} className="font-bold text-[14px] text-white mt-2 mb-1">
+                  {renderFormattedInline(trimmed.slice(3))}
+                </div>
+              );
+            }
+            if (trimmed.startsWith("# ")) {
+              return (
+                <div key={lineIdx} className="font-extrabold text-[15px] text-white mt-2.5 mb-1">
+                  {renderFormattedInline(trimmed.slice(2))}
+                </div>
+              );
+            }
+
+            const bulletMatch = line.match(/^(\s*)([-*]|\d+\.)\s+(.+)$/);
+            if (bulletMatch) {
+              const [, indent, marker, bulletText] = bulletMatch;
+              const indentLevel = Math.floor(indent.length / 2);
+              return (
+                <div
+                  key={lineIdx}
+                  className="flex items-start gap-1.5 text-xs leading-relaxed"
+                  style={{ marginLeft: `${indentLevel * 10}px` }}
+                >
+                  <span className="text-[var(--accent)] select-none shrink-0 font-bold mt-0.5">
+                    {marker.endsWith(".") ? marker : "•"}
+                  </span>
+                  <div className="flex-1 text-[var(--text-primary)]">
+                    {renderFormattedInline(bulletText)}
+                  </div>
+                </div>
+              );
+            }
+
+            return (
+              <p key={lineIdx} className="text-xs leading-relaxed text-[var(--text-primary)]">
+                {renderFormattedInline(line)}
+              </p>
+            );
           })}
-        </span>
+        </div>
       );
     });
   };
@@ -439,7 +511,7 @@ export const SecurityBot: React.FC<SecurityBotProps> = ({
           </div>
 
           {/* Suggestion Chips */}
-          <div className="p-2 border-t border-[var(--card-border)] bg-[var(--card-bg)] flex items-center gap-1.5 overflow-x-auto scrollbar-none">
+          <div className="p-2 border-t border-[var(--card-border)] bg-[var(--card-bg)] flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
             {activeSuggestions.map((sug, i) => (
               <button
                 key={i}

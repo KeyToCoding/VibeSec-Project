@@ -16,7 +16,11 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
-const FASTAPI_URL = (process.env.FASTAPI_URL || 'http://127.0.0.1:8000').replace(/\/+$/, '');
+const FASTAPI_URL = (
+  process.env.FASTAPI_URL && !process.env.FASTAPI_URL.includes('vibesec-backend.onrender.com')
+    ? process.env.FASTAPI_URL
+    : (process.env.RENDER || process.env.IS_RENDER ? 'https://vibesec-fastapi.onrender.com' : 'http://127.0.0.1:8000')
+).replace(/\/+$/, '');
 const FASTAPI_INTERNAL_TOKEN = (process.env.FASTAPI_INTERNAL_TOKEN || '').trim();
 const GEMINI_MODEL = (process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim();
 
@@ -938,7 +942,7 @@ app.post('/api/scan/github', rateLimit(20), async (req, res) => {
                 }
               }
             }
-          } catch {}
+          } catch { }
         }
       }
     }
@@ -979,7 +983,7 @@ app.post('/api/scan/github', rateLimit(20), async (req, res) => {
         } else if (resp.status === 401 || resp.status === 403) {
           return res.status(403).json({ error: `Repository '${owner}/${repo}' is private or inaccessible.` });
         }
-      } catch {}
+      } catch { }
     }
 
     if (!zipBuffer) {
@@ -1070,7 +1074,7 @@ app.post('/api/scan/github', rateLimit(20), async (req, res) => {
               }
             }
           }
-        } catch {}
+        } catch { }
       }
     } catch (err: any) {
       return res.status(502).json({ error: `Failed to unpack repository archive: ${err.message}` });
@@ -1488,8 +1492,8 @@ app.post(['/api/chat', '/api/chat/stream'], rateLimit(40), async (req, res) => {
         context: body.context ?? null,
         stream: isStream,
       }),
-      // Must exceed FastAPI's 90s chat deadline to avoid cancelling valid CPU inference.
-      signal: AbortSignal.timeout(100000),
+      // Must exceed FastAPI's 145s chat deadline (Express timeout: 165s) to avoid cancelling valid CPU inference.
+      signal: AbortSignal.timeout(165000),
     });
 
     const contentType = backendRes.headers.get('content-type') || 'application/json';

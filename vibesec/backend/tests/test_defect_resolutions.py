@@ -18,7 +18,12 @@ from scanner.semgrep_runner import semgrep_scan, detect_ast_sqli, native_fallbac
 from scanner.env_detector import is_aws_example_credential, inspect_env_file_content, is_placeholder_value
 from remediation import apply_snippet_patch_to_code, generate_unified_diff
 from scanner.code_scanner import scan_code
-from models.llm_chain import LLMTimeoutError, LLMProviderError
+from models.llm_chain import (
+    LLMTimeoutError,
+    LLMProviderError,
+    _close_unclosed_code_blocks,
+    _stitch_continuation,
+)
 from scanner.vuln_agent import analyze_chunk
 from unittest.mock import AsyncMock, patch
 from main import generate_session_token, verify_session_credentials
@@ -279,6 +284,35 @@ class TestDefectResolutions(unittest.TestCase):
 
         with self.assertRaises(LLMTimeoutError):
             asyncio.run(run_slow())
+
+    def test_chat_code_block_auto_closing(self):
+        """Unclosed code blocks in model outputs are safely closed."""
+        closed_text = "Here is code:\n```python\nprint(1)\n```"
+        self.assertEqual(_close_unclosed_code_blocks(closed_text), closed_text)
+
+        unclosed_text = "Here is truncated code:\n```python\ncursor.execute('SELECT 1')"
+        fixed = _close_unclosed_code_blocks(unclosed_text)
+        self.assertTrue(fixed.endswith("\n```\n"))
+        self.assertEqual(fixed.count("```"), 2)
+
+    def test_chat_continuation_stitching_and_deduplication(self):
+        """Continuation text is stitched without duplicating overlapping sentences."""
+        original = "- Vulnerability: SQL injection vulnerability detected.\n- Root Cause: Input was concatenated into query.\n- Fix: Use parameterized"
+        continuation = "queries with your database driver.\n- Prevention: Keep dependencies updated."
+        stitched = _stitch_continuation(original, continuation)
+        self.assertIn("queries with your database driver", stitched)
+        self.assertIn("- Prevention", stitched)
+
+        # Overlapping case
+        overlap_orig = "Use parameterized queries with your database driver."
+        overlap_cont = "with your database driver. Always sanitize inputs."
+        stitched_overlap = _stitch_continuation(overlap_orig, overlap_cont)
+        self.assertEqual(
+            stitched_overlap.count("with your database driver"),
+            1,
+            "Overlapping text must be deduplicated",
+        )
+        self.assertIn("Always sanitize inputs.", stitched_overlap)
 
 
 if __name__ == "__main__":

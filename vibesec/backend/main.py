@@ -26,6 +26,7 @@ try:
     from .scanner.file_scanner import scan_upload
     from .scanner.github_scanner import scan_github, GitHubScanError
     from .database import save_scan_result, get_scan_history, get_scan_by_id
+    from .models.prompts import SECURITY_CHAT_PROMPT
     from .models.llm_chain import (
         OLLAMA_URL, OLLAMA_MODEL, COLAB_NGROK_URL, GROQ_API_KEY, GEMINI_API_KEY,
         call_llm, stream_ollama, get_ollama_config, get_ollama_headers,
@@ -39,6 +40,7 @@ except ImportError:
     from scanner.file_scanner import scan_upload
     from scanner.github_scanner import scan_github, GitHubScanError
     from database import save_scan_result, get_scan_history, get_scan_by_id
+    from models.prompts import SECURITY_CHAT_PROMPT
     from models.llm_chain import (
         OLLAMA_URL, OLLAMA_MODEL, COLAB_NGROK_URL, GROQ_API_KEY, GEMINI_API_KEY,
         call_llm, stream_ollama, get_ollama_config, get_ollama_headers,
@@ -491,16 +493,11 @@ Suggested fix: {_clip(req.context.get('fix', ''), 600)}
                 history_items.append(f"{role}: {content}")
     history_text = "\n".join(history_items)
 
-    prompt = f"""You are VibeSec AI, an application-security assistant integrated into a static
-application security testing tool. Explain vulnerabilities accurately and clearly.
-For remediation questions, give a practical fix and the smallest secure code example needed.
-Do not claim to have executed code or verified a fix unless that actually happened.
-Respond in the same language as the user. Use concise prose, not JSON; avoid repeating context.
-{ctx}
-Recent conversation:
-{history_text}
-User: {message[:2000]}
-Assistant:"""
+    prompt = SECURITY_CHAT_PROMPT.format(
+        ctx=ctx,
+        history_text=history_text,
+        message=message[:2000],
+    )
 
     # Handle streaming request
     if req.stream:
@@ -524,13 +521,13 @@ Assistant:"""
         )
 
     try:
-        # Leave margin above Ollama's 75s read timeout for queueing and serialization.
+        # Leave margin above Ollama's 130s chat read timeout for queueing and serialization.
         answer, model_used = await asyncio.wait_for(
             call_llm(prompt, task="chat"),
-            timeout=90.0,
+            timeout=145.0,
         )
     except asyncio.TimeoutError as exc:
-        logger.warning("Chat inference exceeded the 90-second application deadline")
+        logger.warning("Chat inference exceeded the 145-second application deadline")
         raise HTTPException(
             status_code=504,
             detail="AI response timed out. Check that the configured Ollama service is running, then retry with a shorter question.",

@@ -9,6 +9,7 @@ Author: Kartikey Vishwakarma (NIELIT Gorakhpur Major Project)
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Optional, Tuple
@@ -128,6 +129,50 @@ def _response_error_detail(response: httpx.Response) -> str:
     return _short_error(response.text)
 
 
+def _close_unclosed_code_blocks(text: str) -> str:
+    """Ensure any opened code fences (```) are cleanly closed to prevent broken rendering."""
+    if not isinstance(text, str):
+        return ""
+    count = text.count("```")
+    if count % 2 != 0:
+        return text.rstrip() + "\n```\n"
+    return text
+
+
+def _stitch_continuation(original: str, continuation: str) -> str:
+    """Intelligently combine truncated text with its continuation, eliminating overlapping sentences."""
+    orig = original.rstrip()
+    cont = continuation.strip()
+    if not cont:
+        return _close_unclosed_code_blocks(orig)
+
+    # Remove conversational filler at start of continuation if any (e.g., "Sure, continuing:")
+    cont = re.sub(r"^(?:sure|continuing|here is the continuation|to continue)[:,\-]?\s*", "", cont, flags=re.I)
+
+    # Check for overlapping prefix/suffix
+    max_check = min(len(orig), len(cont), 250)
+    overlap_len = 0
+    for length in range(max_check, 8, -1):
+        if orig.endswith(cont[:length]):
+            overlap_len = length
+            break
+
+    if overlap_len > 0:
+        stitched = orig + cont[overlap_len:]
+    else:
+        # Check if continuation starts with a bullet point or sentence
+        if cont.startswith(("-", "*", "•", "1.", "2.", "3.", "4.", "5.")):
+            stitched = orig + "\n" + cont
+        elif orig and orig[-1] not in (" ", "\n", ".", "!", "?", ":", ";", "`"):
+            stitched = orig + " " + cont
+        elif orig and orig[-1] in (".", "!", "?"):
+            stitched = orig + "\n" + cont
+        else:
+            stitched = orig + " " + cont
+
+    return _close_unclosed_code_blocks(stitched)
+
+
 async def _call_ollama(
     prompt: str,
     base_url: str,
@@ -144,7 +189,7 @@ async def _call_ollama(
     endpoint = f"{base_url}/api/generate"
     token_limits = {
         # Concise interactive answers are faster on CPU-hosted local inference.
-        "chat": 256,
+        "chat": 384,
         # Leave enough room for the complete required JSON object.
         "chunk_analysis": 220,
         "patch_generation": 220,
@@ -167,7 +212,7 @@ async def _call_ollama(
         payload["format"] = "json"
 
     # Leave margin for CPU inference while outer FastAPI/Express deadlines remain longer.
-    read_timeout = 85.0 if task in ("patch_generation", "chunk_analysis") else 75.0
+    read_timeout = 130.0 if task == "chat" else 85.0
     timeout = httpx.Timeout(
         connect=12.0,
         read=read_timeout,
@@ -265,6 +310,15 @@ async def _call_ollama(
         logger.warning("Ollama model error: %s", detail)
         raise RuntimeError(f"Ollama model error: {detail}")
 
+    logger.info(
+        "Ollama completion metadata: task=%s done_reason=%s eval_count=%s prompt_eval_count=%s",
+        task,
+        data.get("done_reason"),
+        data.get("eval_count"),
+        data.get("prompt_eval_count"),
+    )
+
+    done_reason = data.get("done_reason")
     result = data.get("response")
     if not isinstance(result, str) or not result.strip():
         logger.warning(
@@ -274,13 +328,55 @@ async def _call_ollama(
         )
         raise RuntimeError("Ollama returned an empty response.")
 
+    # Bounded recovery if chat generation stopped due to token limit
+    if task == "chat" and done_reason == "length":
+        logger.warning(
+            "Ollama chat output reached token limit (done_reason=length, eval_count=%s); initiating bounded continuation.",
+            data.get("eval_count"),
+        )
+        try:
+            cont_prompt = (
+                f"{prompt}\n{result.strip()}\n\n"
+                "[System: The previous response reached the token limit. "
+                "Conclude the explanation concisely in 1 to 2 bullet points. "
+                "Do NOT repeat any existing sentences or bullet points. "
+                "Close all open code blocks and end with a complete sentence.]\n"
+                "Assistant (continued):"
+            )
+            cont_payload = {
+                "model": model,
+                "prompt": cont_prompt,
+                "stream": False,
+                "keep_alive": "10m",
+                "options": {
+                    "temperature": 0.2,
+                    "num_predict": 160,
+                },
+            }
+            cont_timeout = httpx.Timeout(connect=8.0, read=35.0, write=8.0, pool=8.0)
+            async with httpx.AsyncClient(timeout=cont_timeout, follow_redirects=False) as cont_client:
+                cont_resp = await cont_client.post(endpoint, json=cont_payload, headers=headers)
+                if cont_resp.status_code == 200:
+                    cont_data = cont_resp.json()
+                    cont_text = cont_data.get("response", "")
+                    if isinstance(cont_text, str) and cont_text.strip():
+                        result = _stitch_continuation(result, cont_text)
+                        logger.info(
+                            "Ollama bounded continuation succeeded: extra_eval=%s total_chars=%d",
+                            cont_data.get("eval_count"),
+                            len(result),
+                        )
+        except Exception as cont_err:
+            logger.warning("Ollama continuation request failed: %s; ensuring code blocks are closed.", _short_error(cont_err))
+
+    final_result = _close_unclosed_code_blocks(result.strip())
     logger.info(
         "Ollama inference succeeded: model=%s elapsed=%.2fs response_chars=%d",
         model,
         elapsed,
-        len(result),
+        len(final_result),
     )
-    return result.strip()
+    return final_result
 
 
 async def stream_ollama(
@@ -307,10 +403,10 @@ async def stream_ollama(
         "keep_alive": "10m",
         "options": {
             "temperature": 0.2,
-            "num_predict": 256 if task in ("chat", "patch_generation") else 512,
+            "num_predict": 384 if task == "chat" else 256 if task == "patch_generation" else 512,
         },
     }
-    timeout = httpx.Timeout(connect=12.0, read=85.0, write=12.0, pool=8.0)
+    timeout = httpx.Timeout(connect=12.0, read=130.0, write=12.0, pool=8.0)
     headers = get_ollama_headers()
 
     try:

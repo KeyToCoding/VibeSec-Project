@@ -30,23 +30,46 @@ function Find-Cloudflared {
 }
 
 Write-Host '[START] VibeSec Cloudflare Quick Tunnel terminal' -ForegroundColor Cyan
-if (-not (Test-Path $TokenFile)) { throw 'Missing scripts/.proxy_token. Start the authenticated proxy first.' }
+
+# Ensure token exists or initialize
+if (-not (Test-Path $TokenFile)) {
+    $newToken = [Convert]::ToHexString((1..32 | ForEach-Object { Get-Random -Maximum 256 })).ToLower()
+    Set-Content -Path $TokenFile -Value $newToken -Encoding ASCII -NoNewline
+}
 $token = (Get-Content $TokenFile -Raw).Trim()
+
 $proxyReady = $false
 for ($i = 0; $i -lt 120; $i++) {
     if (Test-AuthenticatedProxy $token) { $proxyReady = $true; break }
     if ($i -eq 0) { Write-Host '[WAIT] Waiting for authenticated proxy at 127.0.0.1:11435...' -ForegroundColor Yellow }
     Start-Sleep -Seconds 1
 }
-if (-not $proxyReady) { throw 'Authenticated proxy did not become ready within 120 seconds.' }
+if (-not $proxyReady) {
+    Write-Host '[WARN] Authenticated proxy on port 11435 did not respond. Tunnel cannot forward traffic.' -ForegroundColor Yellow
+    Write-Host '[INFO] Local mode operates normally via direct connection (http://127.0.0.1:11434).' -ForegroundColor Gray
+    Write-Host '[READY] Local mode active - Cloudflare tunnel skipped (authenticated proxy offline).' -ForegroundColor Green
+    while ($true) { Start-Sleep -Seconds 60 }
+}
 
 $cloudflared = Find-Cloudflared
-if (-not $cloudflared) { throw 'cloudflared.exe was not found. Install cloudflared or add it to PATH.' }
+if (-not $cloudflared) {
+    Write-Host '[WARN] cloudflared.exe was not found on PATH or Program Files.' -ForegroundColor Yellow
+    Write-Host '[INFO] Local VibeSec operates independently of Cloudflare.' -ForegroundColor Gray
+    Write-Host '[INFO] To enable remote AI for public Render deployment, install cloudflared: winget install Cloudflare.cloudflared' -ForegroundColor Cyan
+    Write-Host '[READY] Local mode active - Cloudflare tunnel skipped (cloudflared not installed).' -ForegroundColor Green
+    while ($true) { Start-Sleep -Seconds 60 }
+}
+
 try {
     $oldTunnels = @(Get-CimInstance Win32_Process -Filter "Name='cloudflared.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match '127\.0\.0\.1:11435' })
 } catch { $oldTunnels = @() }
 if ($oldTunnels.Count -gt 0) {
-    throw 'An older Cloudflare tunnel for port 11435 is already running. Stop that tunnel with Ctrl+C in its old terminal, then rerun Start All.'
+    Write-Host '[INFO] Existing Cloudflare tunnel detected on port 11435; reusing active process.' -ForegroundColor Green
+    if (Test-Path $UrlFile) {
+        $existingUrl = (Get-Content $UrlFile -Raw).Trim()
+        Write-Host "[READY] Cloudflare tunnel URL: $existingUrl" -ForegroundColor Green
+        while ($true) { Start-Sleep -Seconds 30 }
+    }
 }
 
 foreach ($file in @($UrlFile, $StdOutFile, $StdErrFile)) { if (Test-Path $file) { Remove-Item $file -Force } }
@@ -58,7 +81,7 @@ $seenOut = 0
 $seenErr = 0
 $tunnelUrl = $null
 $startedAt = Get-Date
-Write-Host '[INFO] Starting cloudflared with output redirected to local log files (no PowerShell stderr pipeline).' -ForegroundColor Gray
+Write-Host '[INFO] Starting cloudflared with output redirected to local logs...' -ForegroundColor Gray
 try {
     $process = Start-Process -FilePath $cloudflared -ArgumentList @('tunnel', '--url', 'http://127.0.0.1:11435') -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $StdOutFile -RedirectStandardError $StdErrFile -PassThru
 
@@ -72,6 +95,7 @@ try {
                     if (-not $tunnelUrl -and $line -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') {
                         $tunnelUrl = $Matches[0]
                         Set-Content -LiteralPath $UrlFile -Value $tunnelUrl -Encoding ASCII -NoNewline
+                        Set-Content -LiteralPath (Join-Path $PSScriptRoot '.tunnel_url') -Value $tunnelUrl -Encoding ASCII -NoNewline
                         Write-Host "[READY] Cloudflare tunnel URL: $tunnelUrl" -ForegroundColor Green
                     }
                 }
@@ -79,13 +103,14 @@ try {
             if ($item.Stream -eq 'OUT') { $seenOut = $lines.Count } else { $seenErr = $lines.Count }
         }
         if (-not $tunnelUrl -and ((Get-Date) - $startedAt).TotalSeconds -gt 90) {
-            throw 'Cloudflare URL was not detected within 90 seconds. Review logs/cloudflared-antigravity.stderr.log.'
+            Write-Host '[WARN] Cloudflare URL was not detected within 90 seconds. Checking logs...' -ForegroundColor Yellow
+            break
         }
         Start-Sleep -Milliseconds 400
         $process.Refresh()
     }
 
-    # Flush any final output after the process exits.
+    # Flush any final output
     foreach ($item in @(@{ Path = $StdOutFile; Stream = 'OUT'; Seen = $seenOut }, @{ Path = $StdErrFile; Stream = 'ERR'; Seen = $seenErr })) {
         $lines = @(Get-Content -LiteralPath $item.Path -ErrorAction SilentlyContinue)
         for ($index = [int]$item.Seen; $index -lt $lines.Count; $index++) {
@@ -94,12 +119,13 @@ try {
             if (-not $tunnelUrl -and $line -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') {
                 $tunnelUrl = $Matches[0]
                 Set-Content -LiteralPath $UrlFile -Value $tunnelUrl -Encoding ASCII -NoNewline
+                Set-Content -LiteralPath (Join-Path $PSScriptRoot '.tunnel_url') -Value $tunnelUrl -Encoding ASCII -NoNewline
                 Write-Host "[READY] Cloudflare tunnel URL: $tunnelUrl" -ForegroundColor Green
             }
         }
     }
-    if ($process.ExitCode -ne 0) { throw "cloudflared exited with code $($process.ExitCode). Review logs/cloudflared-antigravity.stderr.log." }
-    throw 'cloudflared exited unexpectedly.'
+
+    while ($true) { Start-Sleep -Seconds 60 }
 }
 finally {
     if ($process -and -not $process.HasExited) {

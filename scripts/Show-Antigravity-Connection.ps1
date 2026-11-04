@@ -6,34 +6,99 @@ Set-Location $ProjectRoot
 
 Write-Host '[START] VibeSec connection details terminal' -ForegroundColor Cyan
 Write-Host '[WAIT] Waiting for the Cloudflare tunnel URL...' -ForegroundColor Yellow
+$scriptsUrl = Join-Path $PSScriptRoot '.tunnel_url'
 for ($i = 0; $i -lt 150; $i++) {
-    if ((Test-Path $UrlFile) -and (Test-Path $TokenFile)) { break }
+    if (((Test-Path $UrlFile) -or (Test-Path $scriptsUrl)) -and (Test-Path $TokenFile)) { break }
+    # If tunnel terminal indicated skipped, don't wait 150 seconds
+    $tunnelOut = Join-Path $ProjectRoot 'logs\cloudflared-antigravity.stdout.log'
+    $tunnelErr = Join-Path $ProjectRoot 'logs\cloudflared-antigravity.stderr.log'
     Start-Sleep -Seconds 1
 }
-if (-not (Test-Path $UrlFile)) { throw 'Cloudflare URL was not created. Check the Cloudflare Tunnel terminal.' }
-if (-not (Test-Path $TokenFile)) { throw 'scripts/.proxy_token is missing. Start the authenticated proxy first.' }
 
-$url = (Get-Content -LiteralPath $UrlFile -Raw).Trim()
-$token = (Get-Content -LiteralPath $TokenFile -Raw).Trim()
-if ($url -notmatch '^https://[a-zA-Z0-9-]+\.trycloudflare\.com$') { throw 'The saved Cloudflare URL does not look valid.' }
-if ($token.Length -lt 16) { throw 'The saved proxy token is empty or invalid.' }
+$hasTunnel = $false
+$url = ""
+if (Test-Path $UrlFile) {
+    $url = (Get-Content -LiteralPath $UrlFile -Raw).Trim()
+    $hasTunnel = ($url -match '^https://[a-zA-Z0-9-]+\.trycloudflare\.com$')
+} elseif (Test-Path $scriptsUrl) {
+    $url = (Get-Content -LiteralPath $scriptsUrl -Raw).Trim()
+    $hasTunnel = ($url -match '^https://[a-zA-Z0-9-]+\.trycloudflare\.com$')
+}
+
+$token = ""
+if (Test-Path $TokenFile) {
+    $token = (Get-Content -LiteralPath $TokenFile -Raw).Trim()
+}
+
+$maskedToken = if ($token.Length -ge 8) { "$($token.Substring(0, 4))...$($token.Substring($token.Length - 4))" } else { "****" }
+
+$clipboardCopied = $false
+if ($token) {
+    try {
+        Set-Clipboard -Value $token
+        $clipboardCopied = $true
+    } catch {}
+}
 
 Clear-Host
 Write-Host '============================================================' -ForegroundColor Cyan
-Write-Host '       VibeSec — Render FastAPI Connection Details' -ForegroundColor Cyan
+Write-Host '       VibeSec — AI Connection & Operating Details          ' -ForegroundColor Cyan
 Write-Host '============================================================' -ForegroundColor Cyan
 Write-Host ''
-Write-Host 'Render > vibesec-fastapi > Environment' -ForegroundColor Gray
+Write-Host 'Local Operating Mode (Default):' -ForegroundColor Yellow
+Write-Host '  Web Interface    : http://localhost:3000' -ForegroundColor White
+Write-Host '  FastAPI Backend  : http://127.0.0.1:8000' -ForegroundColor White
+Write-Host '  Local Ollama     : http://127.0.0.1:11434' -ForegroundColor White
+Write-Host '  Status           : Fully functional locally without cloud dependencies' -ForegroundColor Green
 Write-Host ''
-Write-Host 'OLLAMA_URL' -ForegroundColor Yellow
-Write-Host $url -ForegroundColor White
+
+if ($hasTunnel) {
+    Write-Host 'Public Deployment Mode (Render FastAPI -> Host Machine):' -ForegroundColor Yellow
+    Write-Host '  Render > vibesec-fastapi > Environment Variables:' -ForegroundColor Gray
+    Write-Host '    OLLAMA_URL          : ' -NoNewline -ForegroundColor Gray
+    Write-Host $url -ForegroundColor White
+    Write-Host '    OLLAMA_PROXY_TOKEN  : ' -NoNewline -ForegroundColor Gray
+    Write-Host "$maskedToken (Masked)" -ForegroundColor White
+    if ($clipboardCopied) {
+        Write-Host '  [Copied full token to Windows clipboard automatically]' -ForegroundColor Green
+    }
+    Write-Host ''
+    Write-Host 'Keyboard Shortcuts:' -ForegroundColor Cyan
+    Write-Host '  [T] Copy full OLLAMA_PROXY_TOKEN to clipboard' -ForegroundColor White
+    Write-Host '  [U] Copy OLLAMA_URL to clipboard' -ForegroundColor White
+    Write-Host '  [Q] Exit this monitor' -ForegroundColor White
+} else {
+    Write-Host 'Public Deployment Mode (Optional):' -ForegroundColor Yellow
+    Write-Host '  Cloudflare Tunnel is currently offline or skipped.' -ForegroundColor Gray
+    Write-Host '  Local application on http://localhost:3000 is unaffected and operational.' -ForegroundColor Green
+    Write-Host '  To bridge to public Render: install cloudflared and run task "Start Remote AI Tunnel".' -ForegroundColor Gray
+    Write-Host ''
+    Write-Host 'Keyboard Shortcuts:' -ForegroundColor Cyan
+    if ($token) {
+        Write-Host '  [T] Copy proxy token to clipboard' -ForegroundColor White
+    }
+    Write-Host '  [Q] Exit this monitor' -ForegroundColor White
+}
+
 Write-Host ''
-Write-Host 'OLLAMA_PROXY_TOKEN' -ForegroundColor Yellow
-Write-Host $token -ForegroundColor White
-Write-Host ''
-Write-Host 'IMPORTANT: This token is displayed only in this local terminal.' -ForegroundColor Red
-Write-Host 'Do not take/share screenshots of this terminal or paste the token into chat, code, logs, or GitHub.' -ForegroundColor Red
-Write-Host 'The token is read from scripts/.proxy_token and is NOT written to a new file.' -ForegroundColor Gray
-Write-Host ''
-Write-Host '[READY] Connection details are displayed above. This terminal will remain open.' -ForegroundColor Green
-while ($true) { Start-Sleep -Seconds 60 }
+Write-Host '[READY] Connection details are displayed above.' -ForegroundColor Green
+
+while ($true) {
+    if ([Console]::KeyAvailable) {
+        $key = [Console]::ReadKey($true).Key
+        if ($key -eq [ConsoleKey]::T) {
+            try {
+                Set-Clipboard -Value $token
+                Write-Host "`n[COPIED] OLLAMA_PROXY_TOKEN copied to clipboard!" -ForegroundColor Green
+            } catch {}
+        } elseif ($key -eq [ConsoleKey]::U) {
+            try {
+                Set-Clipboard -Value $url
+                Write-Host "`n[COPIED] OLLAMA_URL copied to clipboard!" -ForegroundColor Green
+            } catch {}
+        } elseif ($key -eq [ConsoleKey]::Q) {
+            break
+        }
+    }
+    Start-Sleep -Milliseconds 250
+}

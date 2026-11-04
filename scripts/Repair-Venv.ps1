@@ -38,6 +38,7 @@ if ($sysPython) {
 
 # Check common AppData / Program Files paths
 $commonPaths = @(
+    "$env:LOCALAPPDATA\Python\pythoncore-3.11-64\python.exe",
     "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
     "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
     "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe",
@@ -63,22 +64,19 @@ Write-Host "`n[*] Selected base Python: $SelectedPython" -ForegroundColor Green
 # 2. Inspect existing .venv
 $NeedsRecreate = $Force
 if (Test-Path $VenvDir) {
-    $cfgPath = Join-Path $VenvDir "pyvenv.cfg"
-    if (Test-Path $cfgPath) {
-        $cfg = Get-Content $cfgPath -Raw
-        $homeMatch = $cfg | Select-String "home\s*=\s*(.+)"
-        if ($homeMatch) {
-            $baseHome = $homeMatch.Matches[0].Groups[1].Value.Trim()
-            $baseExe = Join-Path $baseHome "python.exe"
-            if (-not (Test-Path $baseExe)) {
-                Write-Host "[!] Existing .venv points to missing base Python: $baseExe" -ForegroundColor Yellow
-                $NeedsRecreate = $true
-            } else {
-                Write-Host "[OK] Existing .venv base Python exists: $baseExe" -ForegroundColor Green
-            }
-        }
-    } else {
+    $venvPy = Join-Path $VenvDir "Scripts\python.exe"
+    $venvWorks = $false
+    if (Test-Path $venvPy) {
+        try {
+            $testOut = & "$venvPy" -c "import sys; print(sys.version_info[0])" 2>$null
+            if ($testOut -and $testOut.Trim() -match '^\d+$') { $venvWorks = $true }
+        } catch { $venvWorks = $false }
+    }
+    if (-not $venvWorks) {
+        Write-Host "[!] Existing .venv is broken or points to a missing/inaccessible base Python." -ForegroundColor Yellow
         $NeedsRecreate = $true
+    } else {
+        Write-Host "[OK] Existing .venv is functional: $venvPy" -ForegroundColor Green
     }
 } else {
     $NeedsRecreate = $true
