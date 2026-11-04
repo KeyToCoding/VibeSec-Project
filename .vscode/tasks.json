@@ -239,10 +239,6 @@
         "VibeSec: Start Integrated Services"
       ],
       "dependsOrder": "sequence",
-      "group": {
-        "kind": "build",
-        "isDefault": true
-      },
       "problemMatcher": [],
       "presentation": {
         "reveal": "always",
@@ -268,6 +264,10 @@
         "VibeSec: Start Local Services"
       ],
       "dependsOrder": "sequence",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
       "problemMatcher": [],
       "presentation": {
         "reveal": "always",

@@ -241,3 +241,8 @@ Write-Host "----------------------------------------------------" -ForegroundCol
 Write-Host "To gracefully stop only VibeSec services, run:" -ForegroundColor Gray
 Write-Host "  .\scripts\Stop-VibeSec.ps1" -ForegroundColor Yellow
 Write-Host "====================================================" -ForegroundColor Cyan
+
+if (-not $NoBrowser) {
+    Write-Host "`n[*] Opening http://localhost:3000 in your browser..." -ForegroundColor Cyan
+    Start-Process "http://localhost:3000" | Out-Null
+}

@@ -270,23 +270,23 @@ try {
 Write-Host "`n[4/6] Setting Up Python Backend Environment (.venv)..." -ForegroundColor Yellow
 
 $pythonExe = $null
-$pyCmd = Get-Command "python.exe" -ErrorAction SilentlyContinue
-if (-not $pyCmd) { $pyCmd = Get-Command "python" -ErrorAction SilentlyContinue }
-if ($pyCmd) { $pythonExe = $pyCmd.Source }
 
-# Check common python install directories if python is not in PATH
+# Prioritize Python 3.11 / 3.12 installs (avoids Python 3.14 alpha/pre-release build issues)
+$pyCandidates = @(
+    "$env:LOCALAPPDATA\Python\pythoncore-3.11-64\python.exe",
+    "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+    "C:\Program Files\Python311\python.exe",
+    "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+    "C:\Program Files\Python312\python.exe"
+)
+foreach ($cand in $pyCandidates) {
+    if (Test-Path $cand) { $pythonExe = $cand; break }
+}
+
 if (-not $pythonExe) {
-    $pyCandidates = @(
-        "$env:LOCALAPPDATA\Python\pythoncore-3.11-64\python.exe",
-        "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
-        "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
-        "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe",
-        "C:\Program Files\Python311\python.exe",
-        "C:\Program Files\Python312\python.exe"
-    )
-    foreach ($cand in $pyCandidates) {
-        if (Test-Path $cand) { $pythonExe = $cand; break }
-    }
+    $pyCmd = Get-Command "python.exe" -ErrorAction SilentlyContinue
+    if (-not $pyCmd) { $pyCmd = Get-Command "python" -ErrorAction SilentlyContinue }
+    if ($pyCmd) { $pythonExe = $pyCmd.Source }
 }
 
 if (-not $pythonExe) {
