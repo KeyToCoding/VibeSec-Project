@@ -539,8 +539,24 @@ app.post('/api/scan/code', rateLimit(60), async (req, res) => {
 
 // 3. SCAN URL — Authoritative scan via FastAPI
 app.post('/api/scan/url', rateLimit(30), async (req, res) => {
-  let { url } = req.body;
-  if (!url || typeof url !== 'string') return res.status(400).json({ error: 'URL is required.' });
+  const rawUrl = req.body?.url ?? req.body?.target_url ?? req.body?.scan_url ?? req.body?.website_url;
+  if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.trim()) {
+    return res.status(400).json({ error: 'URL is required.' });
+  }
+
+  let url = rawUrl.trim();
+  if (!/^https?:\/\//i.test(url)) {
+    url = `https://${url}`;
+  }
+
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return res.status(400).json({ error: 'Only HTTP and HTTPS protocols are allowed.' });
+    }
+  } catch {
+    return res.status(400).json({ error: 'Please enter a valid HTTP or HTTPS URL.' });
+  }
 
   try {
     const backendRes = await fetch(`${FASTAPI_URL}/api/scan/url`, {
@@ -549,7 +565,7 @@ app.post('/api/scan/url', rateLimit(30), async (req, res) => {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
       }),
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ url, target_url: url }),
       signal: AbortSignal.timeout(45000),
     });
 
@@ -564,7 +580,8 @@ app.post('/api/scan/url', rateLimit(30), async (req, res) => {
       return res.json(data);
     } else {
       const errJson = await backendRes.json().catch(() => null);
-      return res.status(backendRes.status).json(errJson || { error: `URL scan failed with status ${backendRes.status}` });
+      const errorMsg = errJson?.error || errJson?.detail || `URL scan failed with status ${backendRes.status}`;
+      return res.status(backendRes.status).json({ error: errorMsg, detail: errJson?.detail });
     }
   } catch (err: any) {
     const timedOut = err?.name === 'TimeoutError' || err?.name === 'AbortError';

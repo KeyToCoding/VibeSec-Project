@@ -70,11 +70,37 @@ export const ScanInput: React.FC<ScanInputProps> = ({ onScan, isScanning }) => {
   const [activeTab, setActiveTab] = useState<InputMode>("code");
   const [code, setCode] = useState(PRESET_SNIPPETS.sqli.code);
   const [language, setLanguage] = useState("python");
-  const [url, setUrl] = useState("https://example.com");
+  const [url, setUrl] = useState("");
+  const [urlError, setUrlError] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [githubUrl, setGithubUrl] = useState("https://github.com/");
   const [dragActive, setDragActive] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+
+  const validateUrlInput = (raw: string): { valid: boolean; normalized?: string; error?: string } => {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      return { valid: false, error: "Please enter a website URL to scan." };
+    }
+
+    let candidate = trimmed;
+    if (!/^https?:\/\//i.test(candidate)) {
+      candidate = `https://${candidate}`;
+    }
+
+    try {
+      const parsed = new URL(candidate);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return { valid: false, error: "Only HTTP and HTTPS protocols are allowed." };
+      }
+      if (!parsed.hostname || !parsed.hostname.includes(".")) {
+        return { valid: false, error: "Please enter a valid website domain (e.g. https://example.com)." };
+      }
+      return { valid: true, normalized: candidate };
+    } catch {
+      return { valid: false, error: "Invalid URL format. Please provide a valid HTTP or HTTPS URL." };
+    }
+  };
 
   const handleSelectFile = (selectedFile: File) => {
     const MAX_UPLOAD_BYTES = 100 * 1024 * 1024; // 100 MB
@@ -104,7 +130,13 @@ export const ScanInput: React.FC<ScanInputProps> = ({ onScan, isScanning }) => {
     if (activeTab === "code") {
       onScan("code", { code, language });
     } else if (activeTab === "url") {
-      onScan("url", { target_url: url });
+      const validation = validateUrlInput(url);
+      if (!validation.valid || !validation.normalized) {
+        setUrlError(validation.error || "Please enter a valid URL.");
+        return;
+      }
+      setUrlError(null);
+      onScan("url", { url: validation.normalized, target_url: validation.normalized });
     } else if (activeTab === "upload") {
       if (file) {
         onScan("upload", { file });
@@ -236,10 +268,18 @@ export const ScanInput: React.FC<ScanInputProps> = ({ onScan, isScanning }) => {
                 type="url"
                 required
                 value={url}
-                onChange={(e) => setUrl(e.target.value)}
+                onChange={(e) => {
+                  setUrl(e.target.value);
+                  if (urlError) setUrlError(null);
+                }}
                 placeholder="https://example.com"
                 className="w-full bg-[var(--bg-main)] border border-[var(--card-border)] focus:border-[var(--accent)] rounded-lg px-4 py-2.5 text-xs font-mono text-[var(--text-primary)] focus:outline-none transition-colors"
               />
+              {urlError && (
+                <span className="mt-2 block text-[10px] text-[var(--danger)] bg-[var(--danger)]/10 px-2.5 py-1 rounded border border-[var(--danger)]/30 font-medium">
+                  ⚠️ {urlError}
+                </span>
+              )}
             </div>
 
             {/* Checklist of what gets scanned */}
@@ -364,7 +404,7 @@ export const ScanInput: React.FC<ScanInputProps> = ({ onScan, isScanning }) => {
         {/* SCAN NOW: BugCrowd orange primary CTA button */}
         <button
           type="submit"
-          disabled={isScanning || (activeTab === "upload" && !file)}
+          disabled={isScanning || (activeTab === "upload" && !file) || (activeTab === "url" && !url.trim())}
           className={`w-full py-3 rounded-lg font-bold text-sm tracking-wider flex items-center justify-center gap-2.5 transition-all duration-200 cursor-pointer ${
             isScanning
               ? "bg-[var(--card-border)] text-[var(--text-secondary)] cursor-not-allowed"

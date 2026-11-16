@@ -126,7 +126,8 @@ export default function Home() {
         endpoint = "http://127.0.0.1:8000/scan/url";
         headers["Content-Type"] = "application/json";
         body = JSON.stringify({
-          url: data.target_url,
+          url: data.url || data.target_url,
+          target_url: data.url || data.target_url,
         });
       } else if (mode === "github") {
         endpoint = "http://127.0.0.1:8000/scan/github";

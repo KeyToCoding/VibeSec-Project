@@ -33,6 +33,13 @@ export async function POST(
       });
     } else {
       const bodyJson = await req.json();
+      if (scanType === "url" && bodyJson && typeof bodyJson === "object") {
+        const u = bodyJson.url || bodyJson.target_url || bodyJson.scan_url || bodyJson.website_url;
+        if (u) {
+          bodyJson.url = u;
+          bodyJson.target_url = u;
+        }
+      }
       backendResponse = await fetch(backendEndpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

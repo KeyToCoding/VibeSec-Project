@@ -45,6 +45,9 @@ scripts/.tunnel_active
 .tunnel_url
 .tunnel_active
 
+# Archives
+*.zip
+
 # OS artifacts
 .DS_Store
 Thumbs.db

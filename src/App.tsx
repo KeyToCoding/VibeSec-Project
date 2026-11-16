@@ -217,6 +217,8 @@ export default function App() {
       setLastScannedCode(payload.code);
     } else if (payload.content) {
       setLastScannedCode(payload.content);
+    } else if (payload.url || payload.target_url) {
+      setLastScannedCode(payload.url || payload.target_url);
     }
 
     try {

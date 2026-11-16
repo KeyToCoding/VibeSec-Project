@@ -18,7 +18,7 @@ from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, status, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 try:
     from .scanner.code_scanner import scan_code
@@ -187,7 +187,29 @@ class CodeScanRequest(BaseModel):
 
 
 class UrlScanRequest(BaseModel):
-    url: str = Field(..., description="Target website URL to scan (e.g. https://example.com)")
+    url: Optional[str] = Field(default=None, description="Target website URL to scan (e.g. https://example.com)")
+    target_url: Optional[str] = Field(default=None, description="Alternative field for target website URL")
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_url_field(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            val = None
+            for key in ("url", "target_url", "scan_url", "website_url"):
+                if key in data and data[key] is not None:
+                    raw_val = str(data[key]).strip()
+                    if raw_val:
+                        val = raw_val
+                        break
+                    else:
+                        val = ""
+            cleaned = val if val else None
+            data["url"] = cleaned
+            data["target_url"] = cleaned
+        elif isinstance(data, str):
+            cleaned = data.strip() or None
+            return {"url": cleaned, "target_url": cleaned}
+        return data
 
 
 class GithubScanRequest(BaseModel):
@@ -298,11 +320,19 @@ async def api_scan_code(request: CodeScanRequest, raw_request: Request, response
 @app.post("/api/scan/url")
 async def api_scan_url(request: UrlScanRequest, raw_request: Request, response: Response):
     """Scan target website headers, cookies, and linked JS files."""
-    if not request.url or len(request.url.strip()) < 4:
+    target_url = (request.url or request.target_url or "").strip()
+    if not target_url or len(target_url) < 4:
         raise HTTPException(status_code=400, detail="Valid URL must be specified")
 
     scan_id = str(uuid.uuid4())
-    report = await scan_url(request.url)
+    try:
+        report = await scan_url(target_url)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as exc:
+        logger.error(f"Error scanning URL {target_url}: {exc}")
+        raise HTTPException(status_code=500, detail=f"Failed to scan URL: {str(exc)}")
+
     report["scan_id"] = scan_id
 
     authenticated_sid = get_authenticated_session(raw_request)

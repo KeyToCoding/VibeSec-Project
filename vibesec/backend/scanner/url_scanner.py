@@ -22,6 +22,12 @@ logger = logging.getLogger("vibesec.url_scanner")
 
 def is_safe_public_url(url: str) -> Tuple[bool, str, str]:
     """Validate that the target URL is a safe public address and not an internal/metadata IP (SSRF protection)."""
+    url = (url or "").strip()
+
+    # Reject non-HTTP/HTTPS URI schemes
+    if "://" in url and not url.startswith(("http://", "https://")):
+        return False, "Only HTTP and HTTPS protocols are allowed.", url
+
     if not url.startswith("http://") and not url.startswith("https://"):
         url = "https://" + url
 
